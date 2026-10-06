@@ -1,0 +1,428 @@
+-- =========================================================
+--  ЛОГИКА МОДУЛЕЙ WINTER
+-- =========================================================
+
+-- ========== SNOW через ParticleEmitter ==========
+local snowEmitter=nil
+local snowPart=nil
+
+local function createSnow()
+    if snowEmitter then return end
+    local cam=workspace.CurrentCamera
+    snowPart=Instance.new("Part")
+    snowPart.Size=Vector3.new(2,2,2)
+    snowPart.Anchored=true
+    snowPart.CanCollide=false
+    snowPart.Transparency=1
+    snowPart.Name="PhantomSnowAttach"
+    snowPart.Parent=WS
+    snowEmitter=Instance.new("ParticleEmitter")
+    snowEmitter.Name="PhantomSnow"
+    snowEmitter.Texture="rbxassetid://243660364"
+    snowEmitter.Lifetime=NumberRange.new(5,10)
+    snowEmitter.Rate=C.SnowAmount
+    snowEmitter.Speed=NumberRange.new(C.SnowSpeed*0.5,C.SnowSpeed)
+    snowEmitter.SpreadAngle=Vector2.new(180,180)
+    snowEmitter.Size=NumberSequence.new({
+        NumberSequenceKeypoint.new(0,C.SnowSize),
+        NumberSequenceKeypoint.new(1,C.SnowSize*0.5)
+    })
+    snowEmitter.Transparency=NumberSequence.new({
+        NumberSequenceKeypoint.new(0,0),
+        NumberSequenceKeypoint.new(0.8,0.3),
+        NumberSequenceKeypoint.new(1,1)
+    })
+    snowEmitter.Color=ColorSequence.new(C.SnowColor)
+    snowEmitter.Rotation=NumberRange.new(0,360)
+    snowEmitter.RotSpeed=NumberRange.new(-30,30)
+    snowEmitter.LightEmission=0.1
+    snowEmitter.EmissionDirection=Enum.NormalId.Bottom
+    snowEmitter.Parent=snowPart
+end
+
+local function destroySnow()
+    if snowEmitter then snowEmitter:Destroy() snowEmitter=nil end
+    if snowPart then snowPart:Destroy() snowPart=nil end
+end
+
+RunService.RenderStepped:Connect(function()
+    if C.Snow then
+        if not snowEmitter then createSnow() end
+        local cam=workspace.CurrentCamera
+        snowPart.CFrame=CFrame.new(cam.CFrame.Position+Vector3.new(0,30,0))
+        snowEmitter.Rate=C.SnowAmount
+        snowEmitter.Speed=NumberRange.new(C.SnowSpeed*0.5,C.SnowSpeed)
+        snowEmitter.Size=NumberSequence.new({
+            NumberSequenceKeypoint.new(0,C.SnowSize),
+            NumberSequenceKeypoint.new(1,C.SnowSize*0.5)
+        })
+        snowEmitter.Color=ColorSequence.new(C.SnowColor)
+        if C.Blizzard then
+            snowEmitter.SpreadAngle=Vector2.new(360,360)
+            snowEmitter.Rate=C.SnowAmount*(C.BlizzardPower/30)
+            snowEmitter.Speed=NumberRange.new(C.SnowSpeed*3,C.SnowSpeed*5)
+        else
+            snowEmitter.SpreadAngle=Vector2.new(180,180)
+        end
+    else
+        if snowEmitter then destroySnow() end
+    end
+end)
+
+-- ========== FOG ==========
+task.spawn(function()
+    while task.wait(0.3) do
+        if C.Fog then
+            Lighting.FogColor=C.FogColor
+            Lighting.FogStart=C.FogStart
+            Lighting.FogEnd=C.FogThick and (C.FogEnd/C.FogThickDensity) or C.FogEnd
+        end
+    end
+end)
+
+-- ========== LIGHTING ==========
+task.spawn(function()
+    while task.wait(0.5) do
+        if C.WinterLighting then
+            Lighting.ClockTime=C.ClockTime
+            Lighting.Brightness=C.Brightness
+            Lighting.Ambient=C.AmbientColor
+            Lighting.OutdoorAmbient=C.AmbientColor
+        end
+        if C.BlueTint then
+            Lighting.ColorCorrection = Lighting:FindFirstChild("PhantomTint") or (function()
+                local cc=Instance.new("ColorCorrectionEffect")
+                cc.Name="PhantomTint"
+                cc.Parent=Lighting
+                return cc
+            end)()
+            Lighting.PhantomTint.TintColor=C.BlueTintColor
+            Lighting.PhantomTint.Saturation=-0.1
+        else
+            if Lighting:FindFirstChild("PhantomTint") then Lighting.PhantomTint:Destroy() end
+        end
+        if C.Moonlight then
+            Lighting.ClockTime=0
+            Lighting.Brightness=1
+            Lighting.Ambient=Color3.fromRGB(40,50,80)
+        end
+        if C.StarField then
+            Lighting.ClockTime=0
+        end
+        if C.SlowMotion then
+            Lighting.ClockTime=Lighting.ClockTime
+        end
+    end
+end)
+
+-- ========== AURORA (ColorCorrection) ==========
+local auroraCC=nil
+task.spawn(function()
+    while task.wait(0.1) do
+        if C.Aurora then
+            if not auroraCC then
+                auroraCC=Instance.new("ColorCorrectionEffect")
+                auroraCC.Name="PhantomAurora"
+                auroraCC.Parent=Lighting
+            end
+            local t=tick()
+            local r=(math.sin(t*0.5)+1)/2
+            auroraCC.TintColor=C.AuroraColor1:Lerp(C.AuroraColor2,r)
+            auroraCC.Saturation=0.3
+            auroraCC.Brightness=0.05
+        else
+            if auroraCC then auroraCC:Destroy() auroraCC=nil end
+        end
+    end
+end)
+
+-- ========== ICE WORLD ==========
+task.spawn(function()
+    while task.wait(1) do
+        if C.IceWorld then
+            for _,p in ipairs(WS:GetDescendants()) do
+                if p:IsA("BasePart") and not p.Anchored and p.Name~="HumanoidRootPart"
+                   and not p:FindFirstChildOfClass("Humanoid") then
+                    p.Material=Enum.Material.Ice
+                    p.Reflectance=1-C.IceTransparency
+                    p.Color=C.IceColor
+                    if C.IcePhysics then p.CustomPhysicalProperties=PhysicalProperties.new(0.01,0.3,0.5,1,1) end
+                end
+            end
+        end
+    end
+end)
+
+-- ========== CHRISTMAS LIGHTS ==========
+local xmasLights={}
+task.spawn(function()
+    while task.wait(0.5) do
+        if C.ChristmasLights and #xmasLights==0 then
+            local cam=workspace.CurrentCamera
+            for i=1,30 do
+                local l=Instance.new("PointLight")
+                l.Brightness=2
+                l.Range=15
+                l.Color=C.ChristmasColors and Color3.fromHSV(math.random(),1,1) or Color3.fromRGB(255,50,50)
+                local a=Instance.new("Attachment")
+                a.Position=Vector3.new(math.random(-100,100),math.random(5,25),math.random(-100,100))
+                a.Parent=cam
+                l.Parent=a
+                table.insert(xmasLights,{light=l,att=a})
+            end
+            log("Christmas lights on",COL.accent)
+        elseif not C.ChristmasLights and #xmasLights>0 then
+            for _,d in ipairs(xmasLights) do
+                if d.light then d.light:Destroy() end
+                if d.att then d.att:Destroy() end
+            end
+            xmasLights={}
+            log("Christmas lights off",COL.yellow)
+        end
+    end
+end)
+
+-- ========== CHRISTMAS TREE ==========
+task.spawn(function()
+    while task.wait(1) do
+        if C.ChristmasTree then
+            if not WS:FindFirstChild("PhantomTree") then
+                local tree=Instance.new("Model")
+                tree.Name="PhantomTree"
+                tree.Parent=WS
+                local base=Instance.new("Part")
+                base.Size=Vector3.new(C.ChristmasTreeSize,C.ChristmasTreeSize,C.ChristmasTreeSize)
+                base.Shape=Enum.PartType.Cylinder
+                base.Material=Enum.Material.Grass
+                base.Color=Color3.fromRGB(30,120,50)
+                base.Anchored=true
+                base.Position=workspace.CurrentCamera.CFrame.Position+Vector3.new(0,0,-30)
+                base.Parent=tree
+                local star=Instance.new("Part")
+                star.Shape=Enum.PartType.Ball
+                star.Size=Vector3.new(2,2,2)
+                star.Material=Enum.Material.Neon
+                star.Color=Color3.fromRGB(255,220,80)
+                star.Anchored=true
+                star.Position=base.Position+Vector3.new(0,C.ChristmasTreeSize/2+1,0)
+                star.Parent=tree
+                log("Christmas tree spawned",COL.green)
+            end
+        else
+            local t=WS:FindFirstChild("PhantomTree")
+            if t then t:Destroy() end
+        end
+    end
+end)
+
+-- ========== SNOWMAN ==========
+task.spawn(function()
+    while task.wait(1) do
+        if C.Snowman then
+            if not WS:FindFirstChild("PhantomSnowman") then
+                for i=1,C.SnowmenCount do
+                    local m=Instance.new("Model")
+                    m.Name="PhantomSnowman"
+                    m.Parent=WS
+                    local cam=workspace.CurrentCamera
+                    local base=cam.CFrame.Position+Vector3.new(math.random(-50,50),0,math.random(-50,-15))
+                    for j=1,3 do
+                        local ball=Instance.new("Part")
+                        ball.Shape=Enum.PartType.Ball
+                        ball.Size=Vector3.new(3-j+1,3-j+1,3-j+1)
+                        ball.Material=Enum.Material.Snow
+                        ball.Color=Color3.fromRGB(255,255,255)
+                        ball.Anchored=true
+                        ball.Position=base+Vector3.new(0,j*2,0)
+                        ball.Parent=m
+                    end
+                end
+                log("Snowmen spawned",COL.green)
+            end
+        else
+            for _,o in ipairs(WS:GetDescendants()) do
+                if o.Name=="PhantomSnowman" then o:Destroy() end
+            end
+        end
+    end
+end)
+
+-- ========== PRESENTS ==========
+task.spawn(function()
+    while task.wait(1) do
+        if C.Presents then
+            if not WS:FindFirstChild("PhantomGift") then
+                for i=1,C.PresentsCount do
+                    local g=Instance.new("Model")
+                    g.Name="PhantomGift"
+                    g.Parent=WS
+                    local box=Instance.new("Part")
+                    box.Size=Vector3.new(2,2,2)
+                    box.Material=Enum.Material.Fabric
+                    box.Color=Color3.fromHSV(math.random(),1,1)
+                    box.Anchored=true
+                    local cam=workspace.CurrentCamera
+                    box.Position=cam.CFrame.Position+Vector3.new(math.random(-40,40),0,math.random(-40,-10))
+                    box.Parent=g
+                end
+                log("Presents spawned",COL.green)
+            end
+        else
+            for _,o in ipairs(WS:GetDescendants()) do
+                if o.Name=="PhantomGift" then o:Destroy() end
+            end
+        end
+    end
+end)
+
+-- ========== CANDY CANES ==========
+task.spawn(function()
+    while task.wait(1) do
+        if C.CandyCanes then
+            if not WS:FindFirstChild("PhantomCandy") then
+                for i=1,C.CandyCaneCount do
+                    local c=Instance.new("Model")
+                    c.Name="PhantomCandy"
+                    c.Parent=WS
+                    local bar=Instance.new("Part")
+                    bar.Size=Vector3.new(0.4,8,0.4)
+                    bar.Material=Enum.Material.Plastic
+                    bar.Color=Color3.fromRGB(255,255,255)
+                    bar.Anchored=true
+                    local cam=workspace.CurrentCamera
+                    bar.Position=cam.CFrame.Position+Vector3.new(math.random(-60,60),4,math.random(-60,-10))
+                    bar.Parent=c
+                end
+                log("Candy canes spawned",COL.green)
+            end
+        else
+            for _,o in ipairs(WS:GetDescendants()) do
+                if o.Name=="PhantomCandy" then o:Destroy() end
+            end
+        end
+    end
+end)
+
+-- ========== SOUNDS ==========
+local sounds={}
+local function playSound(name,id,loop,volume)
+    if sounds[name] then return end
+    local s=Instance.new("Sound")
+    s.Name="Phantom_"..name
+    s.SoundId=id
+    s.Looped=loop or false
+    s.Volume=volume or 0.5
+    s.Parent=Sound
+    s:Play()
+    sounds[name]=s
+end
+local function stopSound(name)
+    if sounds[name] then sounds[name]:Destroy() sounds[name]=nil end
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if C.CozyAmbience then
+            playSound("cozy","rbxassetid://1837879082",true,0.3)
+        else stopSound("cozy") end
+        if C.WindSound then
+            playSound("wind","rbxassetid://5153734596",true,0.4)
+        else stopSound("wind") end
+        if C.FireplaceSound then
+            playSound("fire","rbxassetid://6294841288",true,0.3)
+        else stopSound("fire") end
+        if C.JingleBells then
+            playSound("jingle","rbxassetid://1837879082",true,0.4)
+        else stopSound("jingle") end
+        if C.MusicEnabled then
+            if not sounds["music"] then
+                playSound("music","rbxassetid://1837879082",true,C.MusicVolume/100)
+            else
+                sounds["music"].Volume=C.MusicVolume/100
+            end
+        else stopSound("music") end
+    end
+end)
+
+-- ========== WATERMARK ==========
+local wm=Instance.new("TextLabel")
+wm.Size=UDim2.new(0,300,0,28)
+wm.Position=UDim2.new(0,10,1,-38)
+wm.BackgroundColor3=COL.bg
+wm.BackgroundTransparency=0.3
+wm.TextColor3=COL.accent
+wm.Font=FONT_B
+wm.TextSize=13
+wm.Text="❄ PHANTOM WINTER ❄"
+wm.Visible=false
+wm.Parent=screen
+Instance.new("UICorner",wm).CornerRadius=UDim.new(0,4)
+local ws2=Instance.new("UIStroke",wm)
+ws2.Color=COL.accent
+ws2.Thickness=1
+
+task.spawn(function()
+    while task.wait(1) do
+        if C.Watermark then
+            wm.Visible=true
+            wm.Text=string.format("❄ PHANTOM WINTER ❄ | Players: %d | Ping: %dms",
+                #Players:GetPlayers(),
+                math.floor(lp:GetNetworkPing()*1000))
+        else
+            wm.Visible=false
+        end
+    end
+end)
+
+-- ========== SCREEN EFFECTS ==========
+local vignette=Instance.new("ImageLabel")
+vignette.Size=UDim2.new(1,0,1,0)
+vignette.BackgroundTransparency=1
+vignette.Image="rbxassetid://5558563117"
+vignette.ImageTransparency=0.5
+vignette.Visible=false
+vignette.Parent=screen
+
+local frost=Instance.new("ImageLabel")
+frost.Size=UDim2.new(1,0,1,0)
+frost.BackgroundTransparency=1
+frost.Image="rbxassetid://5558563117"
+frost.ImageColor3=Color3.fromRGB(200,220,255)
+frost.ImageTransparency=0.7
+frost.Visible=false
+frost.Parent=screen
+
+local cinematicTop=Instance.new("Frame")
+cinematicTop.Size=UDim2.new(1,0,0.1,0)
+cinematicTop.BackgroundColor3=Color3.new(0,0,0)
+cinematicTop.BorderSizePixel=0
+cinematicTop.Visible=false
+cinematicTop.Parent=screen
+
+local cinematicBot=Instance.new("Frame")
+cinematicBot.Size=UDim2.new(1,0,0.1,0)
+cinematicBot.Position=UDim2.new(0,0,0.9,0)
+cinematicBot.BackgroundColor3=Color3.new(0,0,0)
+cinematicBot.BorderSizePixel=0
+cinematicBot.Visible=false
+cinematicBot.Parent=screen
+
+RunService.RenderStepped:Connect(function()
+    vignette.Visible=C.Vignette
+    frost.Visible=C.FrostOverlay
+    cinematicTop.Visible=C.CinematicBars
+    cinematicBot.Visible=C.CinematicBars
+end)
+
+-- ========== MENU KEYBIND ==========
+UIS.InputBegan:Connect(function(i,gpe)
+    if gpe then return end
+    if i.KeyCode==C.MenuKey then
+        screen.Enabled=not screen.Enabled
+    end
+end)
+
+-- ========== INIT ==========
+log("Phantom Winter Loaded",COL.accent2)
+log("Menu: "..C.MenuKey.Name,COL.textDim)
+log("Discord: discord.gg/NaswmCxrE",COL.accent)
