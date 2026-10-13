@@ -171,6 +171,10 @@ function Core:BuildLayout()
     })
     self.Content = content
 end
+
+-- ВАЖНО: создаём GUI и layout СРАЗУ, до вкладок
+Core:CreateGui()
+Core:BuildLayout()
 --[[ PHANTOM | HvH v3.0 - Part 2/7 : TABS + CONTROLS ]]
 
 function Core:AddTab(name)
@@ -228,7 +232,7 @@ function Core:AddSection(tab, title)
     return header
 end
 
-local function makeRow(tab, label)
+function Core:MakeRow(tab, label)
     local row = new("Frame", {Size=UDim2.new(1,0,0,24), BackgroundTransparency=1, Parent=tab.Page})
     new("TextLabel", {Size=UDim2.new(1,-100,1,0), BackgroundTransparency=1, Text=label,
         TextColor3=CONFIG.Text, Font=Enum.Font.Gotham, TextSize=13,
@@ -239,7 +243,7 @@ end
 
 function Core:AddCheckbox(tab, label, default, callback)
     self:Register("checkbox:"..label)
-    local row = makeRow(tab, label)
+    local row = self:MakeRow(tab, label)
     local state = default or false
     local box = new("TextButton", {
         Size=UDim2.new(0,20,0,20), Position=UDim2.new(1,-20,0.5,-10),
@@ -268,7 +272,7 @@ function Core:AddSlider(tab, label, minV, maxV, default, callback)
     self:Register("slider:"..label)
     minV, maxV = minV or 0, maxV or 100
     local value = default or minV
-    local row = makeRow(tab, label); row.Size = UDim2.new(1,0,0,40)
+    local row = self:MakeRow(tab, label); row.Size = UDim2.new(1,0,0,40)
     local valLbl = new("TextLabel", {Size=UDim2.new(0,60,0,20), Position=UDim2.new(1,-60,0,0),
         BackgroundTransparency=1, Text=tostring(value), TextColor3=CONFIG.Accent,
         Font=Enum.Font.GothamBold, TextSize=13, TextXAlignment=Enum.TextXAlignment.Right, Parent=row})
@@ -317,7 +321,7 @@ end
 
 function Core:AddTextbox(tab, label, default, callback)
     self:Register("textbox:"..label)
-    local row = makeRow(tab, label)
+    local row = self:MakeRow(tab, label)
     local box = new("TextBox", {
         Size=UDim2.new(0,120,0,20), Position=UDim2.new(1,-120,0.5,-10),
         BackgroundColor3=Color3.fromRGB(34,34,40), Text=default or "",
@@ -331,7 +335,7 @@ end
 
 function Core:AddDropdown(tab, label, options, default, callback)
     self:Register("dropdown:"..label)
-    local row = makeRow(tab, label); row.Size = UDim2.new(1,0,0,26)
+    local row = self:MakeRow(tab, label); row.Size = UDim2.new(1,0,0,26)
     local current = default or options[1]
     local open = false
     local btn = new("TextButton", {
@@ -376,7 +380,7 @@ end
 
 function Core:AddKeybind(tab, label, default, callback)
     self:Register("keybind:"..label)
-    local row = makeRow(tab, label)
+    local row = self:MakeRow(tab, label)
     local current = default or Enum.KeyCode.RightShift
     local listening = false
     local btn = new("TextButton", {
@@ -398,7 +402,7 @@ end
 
 function Core:AddColorPicker(tab, label, default, callback)
     self:Register("color:"..label)
-    local row = makeRow(tab, label)
+    local row = self:MakeRow(tab, label)
     local color = default or Color3.fromRGB(255,255,255)
     local swatch = new("TextButton", {
         Size=UDim2.new(0,40,1,0), Position=UDim2.new(1,-40,0,0),
@@ -718,13 +722,6 @@ copyBtn.MouseButton1Click:Connect(function()
     Core:Toast("Скопировано", "Ссылка в буфере обмена", 2)
 end)
 --[[ PHANTOM | HvH v3.0 - Part 7/7 : BOOT ]]
-
-Core:CreateGui()
-Core:BuildLayout()
-
--- Пересоздание вкладок невозможно (они созданы после BuildLayout),
--- но т.к. порядок 1-7 правильный — Sidebar уже существует.
--- Здесь только выбор вкладки по умолчанию и приветствие.
 
 local firstTab = nil
 for name, _ in pairs(Core.TabPages) do
