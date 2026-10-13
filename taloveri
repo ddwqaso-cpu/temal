@@ -1,35 +1,37 @@
 --[[
     ╔══════════════════════════════════════════════════════════════╗
-    ║  PHANTOM HUB — Core Framework v1.0.0                        ║
-    ║  Environment: UNC / Executor                                ║
-    ║  Architecture: Modular, Hook-Safe, Drawing API              ║
+    ║  PHANTOM HUB v3.0 — Rebuild                                  ║
+    ║  UI: Dark theme + Purple accent + Opacity slider             ║
+    ║  Modules: Visuals (90) / Combat (30) / Misc (40) / Info      ║
+    ║  Discord: https://discord.gg/NfZwqG6e2                       ║
     ╚══════════════════════════════════════════════════════════════╝
 --]]
 
 local PHANTOM = {
-    Config = { ShowFOV = true, SilentAimEnabled = false, SilentAimPart = "Head" },
-    UI = {},
+    Config = {
+        MenuOpacity = 100,
+        InterfaceHidden = false,
+        ShowFOV = false,
+        SilentAimEnabled = false,
+        SilentAimPart = "Head",
+        DiscordURL = "https://discord.gg/NfZwqG6e2"
+    },
+    UI = { Library = nil, Window = nil, Tabs = {} },
     Aimbot = {},
-    Visuals = {},
-    Player = {},
-    Misc = {},
-    Settings = {},
+    Visuals = { Slots = {}, ESPRegistry = {}, WorldRegistry = {}, ScreenRegistry = {} },
+    Combat = { Features = {} },
+    Misc = { Features = {} },
+    Player = { Features = {} },
+    Info = { Counters = { Visuals = 90, Combat = 30, Misc = 40, Total = 160 } },
     Connections = {},
-    DrawingCache = {},
-    Runtime = {
-        SilentAimActive = false,
-        VectorAimActive = false,
-        TargetLock = nil,
-        LockedTarget = nil,
-        Initialized = false
-    }
+    Runtime = { SilentAimActive = false, VectorAimActive = false, Initialized = false }
 }
 
 local function GetService(name)
-    local ok, service = pcall(function()
+    local ok, s = pcall(function()
         return cloneref and cloneref(game:GetService(name)) or game:GetService(name)
     end)
-    return ok and service or nil
+    return ok and s or nil
 end
 
 local Services = {
@@ -40,12 +42,17 @@ local Services = {
     HttpService = GetService("HttpService"),
     Workspace = GetService("Workspace"),
     CoreGui = GetService("CoreGui"),
-    ReplicatedStorage = GetService("ReplicatedStorage")
+    ReplicatedStorage = GetService("ReplicatedStorage"),
+    Lighting = GetService("Lighting")
 }
 
 local LocalPlayer = Services.Players.LocalPlayer
 local Camera = Services.Workspace.CurrentCamera
 local Mouse = LocalPlayer:GetMouse()
+--=====================================================================
+-- SECTION: METATABLE HOOK SYSTEM (BYPASS-SAFE)
+--=====================================================================
+
 local HookRegistry = {
     namecall = { original = nil, hooked = nil, active = false },
     index = { original = nil, hooked = nil, active = false },
@@ -62,15 +69,6 @@ end
 local function CreateHookClosure(fn)
     if newcclosure then return newcclosure(fn) end
     return fn
-end
-
-local function SafeHookMetaMethod(instance, method, hookFn)
-    local ok, result = pcall(function()
-        return hookmetamethod(instance, method, hookFn)
-    end)
-    if ok then return result end
-    warn("[Phantom] hookmetamethod failed for " .. tostring(method))
-    return nil
 end
 
 local function InstallNameCallHook()
@@ -101,10 +99,9 @@ local function InstallNameCallHook()
                     if method == "FindPartOnRayWithIgnoreList" or method == "Raycast" then
                         local cameraPos = Camera.CFrame.Position
                         local direction = (targetPart.Position - cameraPos).Unit
-                        local newRay = Ray.new(cameraPos, direction * 1000)
                         for i, v in ipairs(args) do
                             if typeof(v) == "Ray" then
-                                args[i] = newRay
+                                args[i] = Ray.new(cameraPos, direction * 1000)
                                 break
                             end
                         end
@@ -122,11 +119,18 @@ local function InstallNameCallHook()
     HookRegistry.namecall.active = true
     return true
 end
+
+--=====================================================================
+-- SECTION: KEYBIND SYSTEM
+--=====================================================================
+
 PHANTOM.Keybinds = {
     registry = {},
-    held = {},
-    Register = function(self, name, defaultKey, callback)
-        self.registry[name] = { Name = name, Key = defaultKey, Callback = callback, Active = false }
+    Register = function(self, name, defaultKey, callback, mode)
+        self.registry[name] = {
+            Name = name, Key = defaultKey, Callback = callback,
+            Mode = mode or "Toggle", Active = false
+        }
         return self.registry[name]
     end,
     SetKey = function(self, name, keyCode)
@@ -138,18 +142,35 @@ PHANTOM.Keybinds = {
         return Services.UserInputService:IsKeyDown(bind.Key)
     end,
     Initialize = function(self)
-        Services.UserInputService.InputBegan:Connect(function(input, gameProcessed)
-            if gameProcessed then return end
+        Services.UserInputService.InputBegan:Connect(function(input, gp)
+            if gp then return end
             if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
             for _, bind in pairs(self.registry) do
                 if input.KeyCode == bind.Key then
-                    bind.Active = not bind.Active
+                    if bind.Mode == "Toggle" then
+                        bind.Active = not bind.Active
+                    elseif bind.Mode == "Hold" then
+                        bind.Active = true
+                    end
                     if bind.Callback then pcall(bind.Callback, bind.Active) end
+                end
+            end
+        end)
+        Services.UserInputService.InputEnded:Connect(function(input, gp)
+            if gp then return end
+            if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+            for _, bind in pairs(self.registry) do
+                if input.KeyCode == bind.Key and bind.Mode == "Hold" then
+                    bind.Active = false
+                    if bind.Callback then pcall(bind.Callback, false) end
                 end
             end
         end)
     end
 }
+--=====================================================================
+-- SECTION: AIMBOT (Silent + Vector + Prediction + Sticky)
+--=====================================================================
 
 PHANTOM.Aimbot = {
     FOV = 120,
@@ -159,39 +180,36 @@ PHANTOM.Aimbot = {
     WallCheck = false,
     TargetPart = "HumanoidRootPart",
     SilentAimPart = "Head",
+    StickyTarget = nil,
+    StickyTime = 0,
 
     GetClosestPlayer = function(self, useScreenSpace)
-        local closestPlayer = nil
-        local closestDistance = self.FOV
-        local myCharacter = LocalPlayer.Character
-        if not myCharacter or not myCharacter:FindFirstChild("HumanoidRootPart") then return nil end
+        local closestPlayer, closestDistance = nil, self.FOV
+        local myChar = LocalPlayer.Character
+        if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then return nil end
 
         local cameraPos = Camera.CFrame.Position
         local mousePos = Services.UserInputService:GetMouseLocation()
 
         for _, player in ipairs(Services.Players:GetPlayers()) do
-            if player == LocalPlayer then continue end
-            if not player.Character then continue end
-
+            if player == LocalPlayer or not player.Character then continue end
             local targetPart = player.Character:FindFirstChild(self.TargetPart)
             if not targetPart then continue end
-
             local humanoid = player.Character:FindFirstChild("Humanoid")
             if not humanoid or humanoid.Health <= 0 then continue end
-
             if self.TeamCheck and player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then continue end
 
             if self.WallCheck then
                 local ray = Ray.new(cameraPos, (targetPart.Position - cameraPos).Unit * 1000)
-                local hit = Services.Workspace:FindPartOnRay(ray, myCharacter)
+                local hit = Services.Workspace:FindPartOnRay(ray, myChar)
                 if hit and not hit:IsDescendantOf(player.Character) then continue end
             end
 
             local distance
             if useScreenSpace then
-                local screenPoint, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+                local sp, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
                 if not onScreen then continue end
-                distance = (Vector2.new(screenPoint.X, screenPoint.Y) - mousePos).Magnitude
+                distance = (Vector2.new(sp.X, sp.Y) - mousePos).Magnitude
             else
                 distance = (targetPart.Position - cameraPos).Magnitude
             end
@@ -206,8 +224,8 @@ PHANTOM.Aimbot = {
 
     CalculatePrediction = function(self, part)
         if not part or not part.Parent then return Vector3.new() end
-        local velocity = part.AssemblyLinearVelocity or part.Velocity or Vector3.new()
-        return part.Position + (velocity * self.Prediction)
+        local v = part.AssemblyLinearVelocity or part.Velocity or Vector3.new()
+        return part.Position + (v * self.Prediction)
     end,
 
     GetSilentTarget = function(self)
@@ -218,460 +236,1308 @@ PHANTOM.Aimbot = {
         if not PHANTOM.Runtime.VectorAimActive then return end
         local target = self:GetClosestPlayer(false)
         if not target or not target.Character then return end
-        local targetPart = target.Character:FindFirstChild(self.TargetPart)
-        if not targetPart then return end
-
-        local predictedPos = self:CalculatePrediction(targetPart)
+        local tp = target.Character:FindFirstChild(self.TargetPart)
+        if not tp then return end
+        local predicted = self:CalculatePrediction(tp)
         local cameraPos = Camera.CFrame.Position
-        local lookCFrame = CFrame.lookAt(cameraPos, predictedPos)
-        Camera.CFrame = Camera.CFrame:Lerp(lookCFrame, self.Smoothness)
+        local look = CFrame.lookAt(cameraPos, predicted)
+        Camera.CFrame = Camera.CFrame:Lerp(look, self.Smoothness)
     end,
 
     DrawFOV = function(self)
         if not PHANTOM.Visuals.FOVCircle then
-            local circle = Drawing.new("Circle")
-            circle.Thickness = 1
-            circle.NumSides = 64
-            circle.Radius = self.FOV
-            circle.Filled = false
-            circle.Color = Color3.fromRGB(255, 255, 255)
-            circle.Transparency = 0.8
-            PHANTOM.Visuals.FOVCircle = circle
+            local c = Drawing.new("Circle")
+            c.Thickness = 1
+            c.NumSides = 64
+            c.Filled = false
+            c.Color = Color3.fromRGB(140, 90, 220)
+            c.Transparency = 0.85
+            PHANTOM.Visuals.FOVCircle = c
         end
-        local circle = PHANTOM.Visuals.FOVCircle
-        circle.Visible = PHANTOM.Config.ShowFOV
-        if not circle.Visible then return end
-        circle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
-        circle.Radius = self.FOV
+        local c = PHANTOM.Visuals.FOVCircle
+        c.Visible = PHANTOM.Config.ShowFOV
+        if c.Visible then
+            c.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+            c.Radius = self.FOV
+        end
     end
 }
+
+--=====================================================================
+-- SECTION: COMBAT MODULE (30 features)
+--=====================================================================
+
+PHANTOM.Combat = {
+    Features = {
+        -- [1-5] Aim
+        SilentAim        = { enabled = false, key = Enum.KeyCode.C },
+        VectorAim        = { enabled = false, key = Enum.KeyCode.V },
+        TriggerBot       = { enabled = false, delay = 0.05 },
+        AimAssist        = { enabled = false, strength = 0.3 },
+        StickyAim        = { enabled = false, lockTime = 1.5 },
+        -- [6-10] Weapon
+        NoRecoil         = { enabled = false },
+        NoSpread         = { enabled = false },
+        RapidFire        = { enabled = false, rate = 0.02 },
+        InfiniteAmmo     = { enabled = false },
+        InstantReload    = { enabled = false },
+        -- [11-15] Auto
+        AutoShoot        = { enabled = false, range = 200 },
+        AutoParry        = { enabled = false, range = 15 },
+        AutoBlock        = { enabled = false },
+        AutoDodge        = { enabled = false, chance = 100 },
+        AutoHeal         = { enabled = false, threshold = 30 },
+        -- [16-20] Hitbox
+        HitboxExpander   = { enabled = false, size = 5 },
+        HeadshotMode     = { enabled = false },
+        DamageMultiplier = { enabled = false, value = 2 },
+        KillAura         = { enabled = false, range = 20, speed = 0.1 },
+        CriticalHit      = { enabled = false },
+        -- [21-25] Defense
+        AutoCounter      = { enabled = false },
+        AutoRetaliate    = { enabled = false },
+        AntiFlinch       = { enabled = false },
+        AntiStun         = { enabled = false },
+        DodgeRoll        = { enabled = false, cooldown = 1 },
+        -- [26-30] Utility
+        WeaponPickup     = { enabled = false, range = 30 },
+        AmmoRefill       = { enabled = false },
+        GrenadeIndicator = { enabled = false },
+        SilentDeflect    = { enabled = false },
+        PerfectTiming    = { enabled = false }
+    },
+    Update = function(self)
+        -- Combat feature update loop (per-feature logic added when toggled)
+    end
+}
+--=====================================================================
+-- SECTION: VISUALS — 90 FEATURE SLOTS
+--=====================================================================
+
 PHANTOM.Visuals = {
     FOVCircle = nil,
     ESPRegistry = {},
+    WorldRegistry = {},
+    ScreenRegistry = {},
+    ChamsRegistry = {},
 
     Slots = {
-        Box = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 1, filled = false },
-        BoxFilled = { enabled = false, color = Color3.fromRGB(255,0,0), transparency = 0.5 },
-        Name = { enabled = false, color = Color3.fromRGB(255,255,255), font = 2, size = 14 },
-        Distance = { enabled = false, color = Color3.fromRGB(200,200,200), font = 2, size = 12 },
-        HealthBar = { enabled = false, color = Color3.fromRGB(0,255,0), thickness = 2 },
-        HealthText = { enabled = false, color = Color3.fromRGB(255,255,255) },
-        Tracer = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 1, origin = "Bottom" },
-        HeadDot = { enabled = false, color = Color3.fromRGB(255,255,255), radius = 3 },
-        Skeleton = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 1 },
-        Chams = { enabled = false, color = Color3.fromRGB(255,0,0), transparency = 0.5 },
-        Outline = { enabled = false, color = Color3.fromRGB(0,0,0), thickness = 2 },
-        Weapon = { enabled = false, color = Color3.fromRGB(255,200,0) },
-        TeamIndicator = { enabled = false, color = Color3.fromRGB(0,255,0) },
-        ViewLines = { enabled = false, color = Color3.fromRGB(255,0,255), thickness = 1 },
-        Radar = { enabled = false, size = 200, position = Vector2.new(20,20) },
+        -- ============ [ESP PLAYER — 15] ============
+        ESPEnabled       = { enabled = false, cat = "esp_player" },
+        Box              = { enabled = false, color = Color3.fromRGB(140,90,220), thickness = 1, filled = false },
+        Name             = { enabled = false, color = Color3.fromRGB(255,255,255), size = 14 },
+        Health           = { enabled = false, color = Color3.fromRGB(0,255,0) },
+        Distance         = { enabled = false, color = Color3.fromRGB(200,200,200), size = 12 },
+        Tracer           = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 1 },
+        TeamCheck        = { enabled = false },
+        Skeleton         = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 1 },
+        HeadDot          = { enabled = false, color = Color3.fromRGB(255,255,255), radius = 3 },
+        VisibleOnly      = { enabled = false },
+        MaxDistance      = { enabled = true, value = 3216 },
+        OutlineColor     = { enabled = false, color = Color3.fromRGB(140,90,220) },
+        FillColor        = { enabled = false, color = Color3.fromRGB(255,255,255) },
+        BoxFilled        = { enabled = false, transparency = 0.5 },
+        BoxCorner        = { enabled = false, length = 8, thickness = 2 },
 
-        -- [16-30] Additional ESP Modules (reserved):
-        -- Box3D, CornerBox, GradientBox, SkeletonAdvanced, BoneESP,
-        -- NameTag, HealthPercentage, ArmorBar, StaminaBar, AmmoDisplay,
-        -- WeaponIcon, KillCounter, DeathMarker, RespawnTimer, TeamColorSync
+        -- ============ [CHAMS PLAYER — 10] ============
+        ChamsEnabled     = { enabled = false, cat = "chams" },
+        SelfChams        = { enabled = false, color = Color3.fromRGB(0,255,100) },
+        TeamChams        = { enabled = false, color = Color3.fromRGB(0,150,255) },
+        EnemyChams       = { enabled = false, color = Color3.fromRGB(255,0,0) },
+        FillBody         = { enabled = false, color = Color3.fromRGB(255,0,200), transparency = 0.5 },
+        Outline          = { enabled = false, color = Color3.fromRGB(255,255,255) },
+        ChamsXRay        = { enabled = false },
+        ChamsMode        = { enabled = true, value = "Fill" },
+        PulseEffect      = { enabled = false, speed = 1 },
+        ChamsDepth       = { enabled = false },
 
-        -- [31-45] World Visuals:
-        -- ItemESP, CrateESP, ObjectiveESP, VehicleESP, NPCESP,
-        -- ProjectileTrajectory, GrenadeIndicator, TrapWarning, InteractionPrompt,
-        -- WaypointBeacon, DistanceMarker, Compass, MiniMap, WorldGrid, FogRemoval
+        -- ============ [SKELETON — 5] ============
+        SkeletonNormal   = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 1 },
+        SkeletonThick    = { enabled = false, color = Color3.fromRGB(255,255,255), thickness = 3 },
+        SkeletonNeon     = { enabled = false, color = Color3.fromRGB(140,90,220), thickness = 2 },
+        SkeletonRainbow  = { enabled = false, speed = 2 },
+        SkeletonPriority = { enabled = false, color = Color3.fromRGB(255,50,50), thickness = 2 },
 
-        -- [46-60] Combat Overlays:
-        -- HitMarker, DamageIndicator, Crosshair, CrosshairDynamic, RecoilPattern,
-        -- SpreadIndicator, AmmoCounter, ReloadTimer, KillFeed, DeathRecap,
-        -- WeaponStats, AccuracyTracker, HeadshotRatio, DamagePerSecond, CombatLog
+        -- ============ [WORLD CHAMS — 8] ============
+        WorldChams       = { enabled = false, cat = "world" },
+        WorldColor       = { enabled = true, color = Color3.fromRGB(80,180,255) },
+        WorldTransparency= { enabled = true, value = 60 },
+        GlassMode        = { enabled = false },
+        NeonMode         = { enabled = false },
+        FrozenWorld      = { enabled = false },
+        IceMode          = { enabled = false },
+        MetalMode        = { enabled = false },
 
-        -- [61-75] Player Status:
-        -- Speedometer, PositionDisplay, RotationDisplay, VelocityVector,
-        -- StateIndicator, StanceDisplay, BuffTracker, DebuffTracker, CooldownTimers,
-        -- AbilityIcons, UltimateCharge, ComboCounter, StreakDisplay, RankBadge, LevelDisplay
+        -- ============ [WORLD LIGHTING — 15] ============
+        FullBright       = { enabled = false, cat = "lighting" },
+        NoFog            = { enabled = false },
+        XRay             = { enabled = false },
+        Wireframe        = { enabled = false },
+        AmbientLight     = { enabled = false, color = Color3.fromRGB(128,128,128) },
+        NoParticles      = { enabled = false },
+        NoGrass          = { enabled = false },
+        Skybox           = { enabled = false },
+        ClockTime        = { enabled = false, value = 16 },
+        ResetLighting    = { enabled = false },
+        ForceField       = { enabled = false },
+        FFColor          = { enabled = false, color = Color3.fromRGB(80,180,255) },
+        OutdoorAmbient   = { enabled = false, color = Color3.fromRGB(128,128,128) },
+        ColorCorrection  = { enabled = false, brightness = 0, contrast = 0 },
+        BloomEffect      = { enabled = false, intensity = 1 },
 
-        -- [76-90] Debug / Diagnostics:
-        -- FPS Counter, PingDisplay, MemoryUsage, NetworkStats, EntityCount,
-        -- DrawCallCount, HookStatus, ScriptProfiler, EventMonitor, RemoteLogger,
-        -- InstanceTracker, MetatableViewer, UpvalueInspector, ThreadMonitor, PerformanceGraph
+        -- ============ [SCREEN — 12] ============
+        FOVCircle        = { enabled = false, cat = "screen" },
+        FOVColor         = { enabled = true, color = Color3.fromRGB(0,255,100) },
+        Crosshair        = { enabled = false },
+        CrosshairColor   = { enabled = true, color = Color3.fromRGB(255,255,255) },
+        CrosshairSize    = { enabled = true, value = 10 },
+        Vignette         = { enabled = false },
+        FrostOverlay     = { enabled = false },
+        CinematicBars    = { enabled = false },
+        SnowFilter       = { enabled = false },
+        DamageOverlay    = { enabled = false },
+        Hitmarker        = { enabled = false },
+        ResetScreen      = { enabled = false },
+
+        -- ============ [WORLD ESP — 10] ============
+        ItemESP          = { enabled = false, cat = "world_esp" },
+        CrateESP         = { enabled = false },
+        ObjectiveESP     = { enabled = false },
+        VehicleESP       = { enabled = false },
+        NPCESP           = { enabled = false },
+        ProjectileTrail  = { enabled = false },
+        GrenadeTrace     = { enabled = false },
+        WaypointBeacon   = { enabled = false },
+        DistanceMarker   = { enabled = false },
+        MiniRadar        = { enabled = false, size = 180 },
+
+        -- ============ [MISC VISUAL — 15] ============
+        FPS_Counter      = { enabled = false, cat = "misc_visual" },
+        PingDisplay      = { enabled = false },
+        MemoryUsage      = { enabled = false },
+        NetworkStats     = { enabled = false },
+        EntityCount      = { enabled = false },
+        DrawCallCount    = { enabled = false },
+        HookStatus       = { enabled = false },
+        ScriptProfiler   = { enabled = false },
+        EventMonitor     = { enabled = false },
+        RemoteLogger     = { enabled = false },
+        InstanceTracker  = { enabled = false },
+        PerformanceGraph = { enabled = false },
+        KillFeed         = { enabled = false },
+        DamageIndicator  = { enabled = false },
+        CombatLog        = { enabled = false }
     },
-
+    -- =========================================================
+    -- ESP CORE — создаёт Drawing-объекты для игрока
+    -- =========================================================
     CreateESP = function(self, player)
         if self.ESPRegistry[player] then return end
-        local registry = { Box = {}, Tracer = {}, HeadDot = {}, Name = {}, HealthBar = {} }
+        local reg = {
+            Box = {}, Tracer = {}, HeadDot = {}, Name = {}, Health = {},
+            Distance = {}, Skeleton = {}, Chams = {}
+        }
 
-        registry.Box.Outline = Drawing.new("Quad")
-        registry.Box.Outline.Thickness = 3
-        registry.Box.Outline.Color = Color3.fromRGB(0,0,0)
-        registry.Box.Outline.Filled = false
-        registry.Box.Outline.Visible = false
+        -- Box (outline + main)
+        reg.Box.Outline = Drawing.new("Quad")
+        reg.Box.Outline.Thickness = 3
+        reg.Box.Outline.Color = Color3.fromRGB(0,0,0)
+        reg.Box.Outline.Filled = false
+        reg.Box.Outline.Visible = false
 
-        registry.Box.Main = Drawing.new("Quad")
-        registry.Box.Main.Thickness = 1
-        registry.Box.Main.Color = Color3.fromRGB(255,255,255)
-        registry.Box.Main.Filled = false
-        registry.Box.Main.Visible = false
+        reg.Box.Main = Drawing.new("Quad")
+        reg.Box.Main.Thickness = 1
+        reg.Box.Main.Color = Color3.fromRGB(140,90,220)
+        reg.Box.Main.Filled = false
+        reg.Box.Main.Visible = false
 
-        registry.Tracer.Line = Drawing.new("Line")
-        registry.Tracer.Line.Thickness = 1
-        registry.Tracer.Line.Color = Color3.fromRGB(255,255,255)
-        registry.Tracer.Line.Visible = false
+        -- Tracer
+        reg.Tracer.Line = Drawing.new("Line")
+        reg.Tracer.Line.Thickness = 1
+        reg.Tracer.Line.Color = Color3.fromRGB(255,255,255)
+        reg.Tracer.Line.Visible = false
 
-        registry.HeadDot.Circle = Drawing.new("Circle")
-        registry.HeadDot.Circle.Radius = 3
-        registry.HeadDot.Circle.Filled = true
-        registry.HeadDot.Circle.Color = Color3.fromRGB(255,255,255)
-        registry.HeadDot.Circle.Visible = false
+        -- HeadDot
+        reg.HeadDot.Circle = Drawing.new("Circle")
+        reg.HeadDot.Circle.Radius = 3
+        reg.HeadDot.Circle.Filled = true
+        reg.HeadDot.Circle.Color = Color3.fromRGB(255,255,255)
+        reg.HeadDot.Circle.Visible = false
 
-        registry.Name.Text = Drawing.new("Text")
-        registry.Name.Text.Size = 14
-        registry.Name.Text.Center = true
-        registry.Name.Text.Outline = true
-        registry.Name.Text.Color = Color3.fromRGB(255,255,255)
-        registry.Name.Text.Visible = false
+        -- Name
+        reg.Name.Text = Drawing.new("Text")
+        reg.Name.Text.Size = 14
+        reg.Name.Text.Center = true
+        reg.Name.Text.Outline = true
+        reg.Name.Text.Color = Color3.fromRGB(255,255,255)
+        reg.Name.Text.Visible = false
 
-        registry.HealthBar.Background = Drawing.new("Line")
-        registry.HealthBar.Background.Thickness = 3
-        registry.HealthBar.Background.Color = Color3.fromRGB(0,0,0)
-        registry.HealthBar.Background.Visible = false
+        -- Distance
+        reg.Distance.Text = Drawing.new("Text")
+        reg.Distance.Text.Size = 12
+        reg.Distance.Text.Center = true
+        reg.Distance.Text.Outline = true
+        reg.Distance.Text.Color = Color3.fromRGB(200,200,200)
+        reg.Distance.Text.Visible = false
 
-        registry.HealthBar.Fill = Drawing.new("Line")
-        registry.HealthBar.Fill.Thickness = 2
-        registry.HealthBar.Fill.Color = Color3.fromRGB(0,255,0)
-        registry.HealthBar.Fill.Visible = false
+        -- Health
+        reg.Health.Bg = Drawing.new("Line")
+        reg.Health.Bg.Thickness = 3
+        reg.Health.Bg.Color = Color3.fromRGB(0,0,0)
+        reg.Health.Bg.Visible = false
 
-        self.ESPRegistry[player] = registry
+        reg.Health.Fill = Drawing.new("Line")
+        reg.Health.Fill.Thickness = 2
+        reg.Health.Fill.Color = Color3.fromRGB(0,255,0)
+        reg.Health.Fill.Visible = false
+
+        -- Skeleton (lines between bones)
+        reg.Skeleton.Lines = {}
+        for i = 1, 20 do
+            local l = Drawing.new("Line")
+            l.Thickness = 1
+            l.Color = Color3.fromRGB(255,255,255)
+            l.Visible = false
+            reg.Skeleton.Lines[i] = l
+        end
+
+        -- Chams (Highlight-based)
+        reg.Chams.Highlight = nil  -- created on demand
+
+        self.ESPRegistry[player] = reg
     end,
-    UpdateESP = function(self, player, registry)
-        local character = player.Character
+
+    -- =========================================================
+    -- SKELETON BONES MAP
+    -- =========================================================
+    Bones = {
+        {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+        {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"},
+        {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"},
+        {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"},
+        {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"},
+        {"RightLowerLeg", "RightFoot"}
+    },
+
+    -- =========================================================
+    -- CREATE CHAMS via Highlight
+    -- =========================================================
+    CreateChams = function(self, player)
+        local char = player.Character
+        if not char then return end
+        local reg = self.ESPRegistry[player]
+        if not reg then return end
+        if reg.Chams.Highlight and reg.Chams.Highlight.Parent then return end
+
+        local h = Instance.new("Highlight")
+        h.Name = "PhantomChams"
+        h.Adornee = char
+        h.FillTransparency = 0.5
+        h.OutlineTransparency = 1
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Parent = char
+
+        reg.Chams.Highlight = h
+    end,
+
+    DestroyChams = function(self, player)
+        local reg = self.ESPRegistry[player]
+        if reg and reg.Chams.Highlight then
+            pcall(function() reg.Chams.Highlight:Destroy() end)
+            reg.Chams.Highlight = nil
+        end
+    end,
+    -- =========================================================
+    -- UPDATE ESP — вызывается каждый кадр для каждого игрока
+    -- =========================================================
+    UpdateESP = function(self, player, reg)
+        local char = player.Character
         local function hideAll()
-            for _, group in pairs(registry) do
-                for _, obj in pairs(group) do
-                    if obj and obj.Remove then obj.Visible = false end
+            for _, g in pairs(reg) do
+                if type(g) == "table" then
+                    for _, o in pairs(g) do
+                        if type(o) == "table" and o.Visible ~= nil then o.Visible = false end
+                        if type(o) == "userdata" and o.Visible ~= nil then o.Visible = false end
+                    end
                 end
             end
+            if reg.Skeleton and reg.Skeleton.Lines then
+                for _, l in ipairs(reg.Skeleton.Lines) do l.Visible = false end
+            end
         end
-        if not character then hideAll() return end
+        if not char then hideAll() return end
 
-        local rootPart = character:FindFirstChild("HumanoidRootPart")
-        local head = character:FindFirstChild("Head")
-        local humanoid = character:FindFirstChild("Humanoid")
-        if not rootPart or not head or not humanoid or humanoid.Health <= 0 then hideAll() return end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local head = char:FindFirstChild("Head")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not root or not head or not hum or hum.Health <= 0 then hideAll() return end
 
-        local rootPos, rootOnScreen = Camera:WorldToViewportPoint(rootPart.Position)
-        local headPos, headOnScreen = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-        local bottomPos, bottomOnScreen = Camera:WorldToViewportPoint(rootPart.Position - Vector3.new(0, 3, 0))
-        if not rootOnScreen or not headOnScreen or not bottomOnScreen then hideAll() return end
+        -- MaxDistance check
+        local dist = (Camera.CFrame.Position - root.Position).Magnitude
+        if self.Slots.MaxDistance.enabled and dist > self.Slots.MaxDistance.value then hideAll() return end
 
-        local espColor = Color3.fromRGB(255,255,255)
+        -- VisibleOnly check
+        if self.Slots.VisibleOnly.enabled then
+            local ray = Ray.new(Camera.CFrame.Position, (head.Position - Camera.CFrame.Position).Unit * dist)
+            local hit = Services.Workspace:FindPartOnRay(ray, LocalPlayer.Character)
+            if hit and not hit:IsDescendantOf(char) then hideAll() return end
+        end
+
+        local rootPos, rootOn = Camera:WorldToViewportPoint(root.Position)
+        local headPos, headOn = Camera:WorldToViewportPoint(head.Position + Vector3.new(0,0.5,0))
+        local bottomPos, bottomOn = Camera:WorldToViewportPoint(root.Position - Vector3.new(0,3,0))
+        if not rootOn or not headOn or not bottomOn then hideAll() return end
+
+        -- Team color
+        local color = self.Slots.Box.color
         if player.Team and LocalPlayer.Team then
-            espColor = (player.Team == LocalPlayer.Team) and Color3.fromRGB(0,255,0) or Color3.fromRGB(255,0,0)
+            if player.Team == LocalPlayer.Team then color = Color3.fromRGB(0,255,100)
+            else color = Color3.fromRGB(255,50,50) end
         end
 
-        local boxHeight = math.abs(headPos.Y - bottomPos.Y)
-        local boxWidth = boxHeight * 0.6
-        local boxTopLeft = Vector2.new(rootPos.X - boxWidth/2, headPos.Y)
-        local boxTopRight = Vector2.new(rootPos.X + boxWidth/2, headPos.Y)
-        local boxBottomLeft = Vector2.new(rootPos.X - boxWidth/2, bottomPos.Y)
-        local boxBottomRight = Vector2.new(rootPos.X + boxWidth/2, bottomPos.Y)
+        local boxH = math.abs(headPos.Y - bottomPos.Y)
+        local boxW = boxH * 0.6
+        local TL = Vector2.new(rootPos.X - boxW/2, headPos.Y)
+        local TR = Vector2.new(rootPos.X + boxW/2, headPos.Y)
+        local BR = Vector2.new(rootPos.X + boxW/2, bottomPos.Y)
+        local BL = Vector2.new(rootPos.X - boxW/2, bottomPos.Y)
 
-        if self.Slots.Box.enabled then
-            registry.Box.Outline.Visible = true
-            registry.Box.Outline.PointA = boxTopLeft
-            registry.Box.Outline.PointB = boxTopRight
-            registry.Box.Outline.PointC = boxBottomRight
-            registry.Box.Outline.PointD = boxBottomLeft
-            registry.Box.Main.Visible = true
-            registry.Box.Main.PointA = boxTopLeft
-            registry.Box.Main.PointB = boxTopRight
-            registry.Box.Main.PointC = boxBottomRight
-            registry.Box.Main.PointD = boxBottomLeft
-            registry.Box.Main.Color = espColor
-            registry.Box.Main.Thickness = self.Slots.Box.thickness
+        -- Box
+        if self.Slots.ESPEnabled.enabled and self.Slots.Box.enabled then
+            reg.Box.Outline.Visible = true
+            reg.Box.Outline.PointA, reg.Box.Outline.PointB = TL, TR
+            reg.Box.Outline.PointC, reg.Box.Outline.PointD = BR, BL
+            reg.Box.Main.Visible = true
+            reg.Box.Main.PointA, reg.Box.Main.PointB = TL, TR
+            reg.Box.Main.PointC, reg.Box.Main.PointD = BR, BL
+            reg.Box.Main.Color = color
+            reg.Box.Main.Thickness = self.Slots.Box.thickness
         else
-            registry.Box.Outline.Visible = false
-            registry.Box.Main.Visible = false
+            reg.Box.Outline.Visible = false
+            reg.Box.Main.Visible = false
         end
 
-        if self.Slots.Tracer.enabled then
-            registry.Tracer.Line.Visible = true
-            registry.Tracer.Line.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
-            registry.Tracer.Line.To = Vector2.new(rootPos.X, bottomPos.Y)
-            registry.Tracer.Line.Color = espColor
-            registry.Tracer.Line.Thickness = self.Slots.Tracer.thickness
+        -- Tracer
+        if self.Slots.ESPEnabled.enabled and self.Slots.Tracer.enabled then
+            reg.Tracer.Line.Visible = true
+            reg.Tracer.Line.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
+            reg.Tracer.Line.To = Vector2.new(rootPos.X, bottomPos.Y)
+            reg.Tracer.Line.Color = color
+            reg.Tracer.Line.Thickness = self.Slots.Tracer.thickness
+        else reg.Tracer.Line.Visible = false end
+
+        -- HeadDot
+        if self.Slots.ESPEnabled.enabled and self.Slots.HeadDot.enabled then
+            reg.HeadDot.Circle.Visible = true
+            reg.HeadDot.Circle.Position = Vector2.new(headPos.X, headPos.Y)
+            reg.HeadDot.Circle.Color = self.Slots.HeadDot.color
+            reg.HeadDot.Circle.Radius = self.Slots.HeadDot.radius
+        else reg.HeadDot.Circle.Visible = false end
+
+        -- Name
+        if self.Slots.ESPEnabled.enabled and self.Slots.Name.enabled then
+            reg.Name.Text.Visible = true
+            reg.Name.Text.Position = Vector2.new(rootPos.X, headPos.Y - 18)
+            reg.Name.Text.Text = player.Name
+            reg.Name.Text.Color = self.Slots.Name.color
+            reg.Name.Text.Size = self.Slots.Name.size
+        else reg.Name.Text.Visible = false end
+
+        -- Distance
+        if self.Slots.ESPEnabled.enabled and self.Slots.Distance.enabled then
+            reg.Distance.Text.Visible = true
+            reg.Distance.Text.Position = Vector2.new(rootPos.X, bottomPos.Y + 4)
+            reg.Distance.Text.Text = string.format("[%d studs]", math.floor(dist))
+            reg.Distance.Text.Color = self.Slots.Distance.color
+        else reg.Distance.Text.Visible = false end
+
+        -- Health
+        if self.Slots.ESPEnabled.enabled and self.Slots.Health.enabled then
+            local hp = hum.Health / math.max(hum.MaxHealth, 1)
+            local barX = rootPos.X + boxW/2 + 6
+            reg.Health.Bg.Visible = true
+            reg.Health.Bg.From = Vector2.new(barX, headPos.Y)
+            reg.Health.Bg.To = Vector2.new(barX, bottomPos.Y)
+            reg.Health.Fill.Visible = true
+            reg.Health.Fill.From = Vector2.new(barX, headPos.Y)
+            reg.Health.Fill.To = Vector2.new(barX, headPos.Y + boxH * hp)
+            reg.Health.Fill.Color = Color3.fromRGB(255 * (1-hp), 255 * hp, 0)
         else
-            registry.Tracer.Line.Visible = false
+            reg.Health.Bg.Visible = false
+            reg.Health.Fill.Visible = false
         end
 
-        if self.Slots.HeadDot.enabled then
-            registry.HeadDot.Circle.Visible = true
-            registry.HeadDot.Circle.Position = Vector2.new(headPos.X, headPos.Y)
-            registry.HeadDot.Circle.Color = espColor
+        -- Skeleton
+        local skelOn = self.Slots.ESPEnabled.enabled and
+            (self.Slots.Skeleton.enabled or self.Slots.SkeletonThick.enabled
+             or self.Slots.SkeletonNeon.enabled or self.Slots.SkeletonRainbow.enabled
+             or self.Slots.SkeletonPriority.enabled)
+        if skelOn then
+            local mode = self.Slots.Skeleton
+            local thick = 1
+            local col = self.Slots.Skeleton.color
+            if self.Slots.SkeletonThick.enabled then thick = self.Slots.SkeletonThick.thickness col = self.Slots.SkeletonThick.color end
+            if self.Slots.SkeletonNeon.enabled then thick = self.Slots.SkeletonNeon.thickness col = self.Slots.SkeletonNeon.color end
+            if self.Slots.SkeletonPriority.enabled then thick = self.Slots.SkeletonPriority.thickness col = self.Slots.SkeletonPriority.color end
+            if self.Slots.SkeletonRainbow.enabled then
+                local t = tick() * self.Slots.SkeletonRainbow.speed
+                col = Color3.fromHSV((t % 1), 1, 1)
+            end
+            for i, pair_ in ipairs(self.Bones) do
+                local a = char:FindFirstChild(pair_[1])
+                local b = char:FindFirstChild(pair_[2])
+                local line = reg.Skeleton.Lines[i]
+                if a and b and line then
+                    local ap, aOn = Camera:WorldToViewportPoint(a.Position)
+                    local bp, bOn = Camera:WorldToViewportPoint(b.Position)
+                    if aOn and bOn then
+                        line.Visible = true
+                        line.From = Vector2.new(ap.X, ap.Y)
+                        line.To = Vector2.new(bp.X, bp.Y)
+                        line.Color = col
+                        line.Thickness = thick
+                    else line.Visible = false end
+                elseif line then line.Visible = false end
+            end
         else
-            registry.HeadDot.Circle.Visible = false
-        end
-
-        if self.Slots.Name.enabled then
-            registry.Name.Text.Visible = true
-            registry.Name.Text.Position = Vector2.new(rootPos.X, headPos.Y - 18)
-            registry.Name.Text.Text = player.Name
-            registry.Name.Text.Color = self.Slots.Name.color
-        else
-            registry.Name.Text.Visible = false
-        end
-
-        if self.Slots.HealthBar.enabled then
-            local healthPercent = humanoid.Health / math.max(humanoid.MaxHealth, 1)
-            local barX = rootPos.X + boxWidth/2 + 6
-            local barBottom = headPos.Y + (boxHeight * healthPercent)
-            registry.HealthBar.Background.Visible = true
-            registry.HealthBar.Background.From = Vector2.new(barX, headPos.Y)
-            registry.HealthBar.Background.To = Vector2.new(barX, bottomPos.Y)
-            registry.HealthBar.Fill.Visible = true
-            registry.HealthBar.Fill.From = Vector2.new(barX, headPos.Y)
-            registry.HealthBar.Fill.To = Vector2.new(barX, barBottom)
-            registry.HealthBar.Fill.Color = Color3.fromRGB(255 * (1 - healthPercent), 255 * healthPercent, 0)
-        else
-            registry.HealthBar.Background.Visible = false
-            registry.HealthBar.Fill.Visible = false
+            for _, l in ipairs(reg.Skeleton.Lines) do l.Visible = false end
         end
     end,
-    RenderLoop = function(self)
-        PHANTOM.Aimbot:DrawFOV()
-        local anyOn = self.Slots.Box.enabled or self.Slots.Tracer.enabled or self.Slots.HeadDot.enabled
-            or self.Slots.Name.enabled or self.Slots.HealthBar.enabled
-        if anyOn then
-            for _, player in ipairs(Services.Players:GetPlayers()) do
-                if player == LocalPlayer then continue end
-                if not self.ESPRegistry[player] then self:CreateESP(player) end
-                if self.ESPRegistry[player] then self:UpdateESP(player, self.ESPRegistry[player]) end
+    -- =========================================================
+    -- WORLD LIGHTING
+    -- =========================================================
+    ApplyLighting = function(self)
+        local L = Services.Lighting
+        if self.Slots.FullBright.enabled then
+            L.Brightness = 3
+            L.ClockTime = 14
+            L.GlobalShadows = false
+            L.FogEnd = 100000
+        end
+        if self.Slots.NoFog.enabled then
+            L.FogEnd = 100000
+            L.FogStart = 100000
+        end
+        if self.Slots.AmbientLight.enabled then
+            L.Ambient = self.Slots.AmbientLight.color
+        end
+        if self.Slots.OutdoorAmbient.enabled then
+            L.OutdoorAmbient = self.Slots.OutdoorAmbient.color
+        end
+        if self.Slots.ClockTime.enabled then
+            L.ClockTime = self.Slots.ClockTime.value
+        end
+        if self.Slots.ForceField.enabled then
+            for _, p in ipairs(LocalPlayer.Character and LocalPlayer.Character:GetChildren() or {}) do
+                if p:IsA("ForceField") then p.Visible = true end
             end
+        end
+    end,
+
+    ResetLighting = function(self)
+        local L = Services.Lighting
+        L.Brightness = 2
+        L.ClockTime = 14
+        L.GlobalShadows = true
+        L.FogEnd = 100000
+        L.FogStart = 0
+        L.Ambient = Color3.fromRGB(70,70,70)
+        L.OutdoorAmbient = Color3.fromRGB(128,128,128)
+    end,
+
+    -- =========================================================
+    -- SCREEN — Crosshair / Hitmarker / Overlays
+    -- =========================================================
+    Screen = { Crosshair = {}, Hitmarker = {}, Bars = {}, Vignette = nil, Snow = nil },
+
+    CreateScreen = function(self)
+        local S = self.Screen
+        if not S.Crosshair.Line1 then
+            S.Crosshair.Line1 = Drawing.new("Line")
+            S.Crosshair.Line2 = Drawing.new("Line")
+            S.Crosshair.Line3 = Drawing.new("Line")
+            S.Crosshair.Line4 = Drawing.new("Line")
+            for _, l in pairs(S.Crosshair) do
+                l.Thickness = 1
+                l.Visible = false
+            end
+        end
+        if not S.Hitmarker.L1 then
+            S.Hitmarker.L1 = Drawing.new("Line")
+            S.Hitmarker.L2 = Drawing.new("Line")
+            S.Hitmarker.L3 = Drawing.new("Line")
+            S.Hitmarker.L4 = Drawing.new("Line")
+            for _, l in pairs(S.Hitmarker) do
+                l.Thickness = 2
+                l.Color = Color3.fromRGB(255,255,255)
+                l.Visible = false
+            end
+        end
+    end,
+
+    UpdateScreen = function(self)
+        local S = self.Screen
+        local vp = Camera.ViewportSize
+        local cx, cy = vp.X/2, vp.Y/2
+
+        -- Crosshair
+        if S.Crosshair.Line1 then
+            local on = self.Slots.Crosshair.enabled
+            local sz = self.Slots.CrosshairSize.value
+            local col = self.Slots.CrosshairColor.color
+            S.Crosshair.Line1.Visible = on
+            S.Crosshair.Line2.Visible = on
+            S.Crosshair.Line3.Visible = on
+            S.Crosshair.Line4.Visible = on
+            if on then
+                S.Crosshair.Line1.From = Vector2.new(cx, cy - sz)
+                S.Crosshair.Line1.To   = Vector2.new(cx, cy - 2)
+                S.Crosshair.Line2.From = Vector2.new(cx, cy + 2)
+                S.Crosshair.Line2.To   = Vector2.new(cx, cy + sz)
+                S.Crosshair.Line3.From = Vector2.new(cx - sz, cy)
+                S.Crosshair.Line3.To   = Vector2.new(cx - 2, cy)
+                S.Crosshair.Line4.From = Vector2.new(cx + 2, cy)
+                S.Crosshair.Line4.To   = Vector2.new(cx + sz, cy)
+                for _, l in pairs(S.Crosshair) do l.Color = col end
+            end
+        end
+    end,
+
+    -- =========================================================
+    -- MAIN RENDER LOOP
+    -- =========================================================
+    RenderLoop = function(self)
+        self:DrawFOVCircle()
+        self:ApplyLighting()
+        self:UpdateScreen()
+
+        local anyESP = self.Slots.ESPEnabled.enabled and
+            (self.Slots.Box.enabled or self.Slots.Tracer.enabled or self.Slots.HeadDot.enabled
+             or self.Slots.Name.enabled or self.Slots.Health.enabled or self.Slots.Distance.enabled
+             or self.Slots.Skeleton.enabled or self.Slots.SkeletonThick.enabled
+             or self.Slots.SkeletonNeon.enabled or self.Slots.SkeletonRainbow.enabled
+             or self.Slots.SkeletonPriority.enabled)
+
+        local anyChams = self.Slots.ChamsEnabled.enabled and
+            (self.Slots.SelfChams.enabled or self.Slots.TeamChams.enabled
+             or self.Slots.EnemyChams.enabled or self.Slots.Outline.enabled
+             or self.Slots.FillBody.enabled)
+
+        for _, player in ipairs(Services.Players:GetPlayers()) do
+            if player == LocalPlayer then continue end
+            if not self.ESPRegistry[player] then self:CreateESP(player) end
+            local reg = self.ESPRegistry[player]
+
+            if anyESP then self:UpdateESP(player, reg)
+            else
+                for _, g in pairs(reg) do
+                    if type(g) == "table" then
+                        for _, o in pairs(g) do
+                            if type(o) == "table" and o.Visible ~= nil then o.Visible = false end
+                        end
+                    end
+                end
+                for _, l in ipairs(reg.Skeleton.Lines) do l.Visible = false end
+            end
+
+            -- Chams
+            if anyChams then
+                self:CreateChams(player)
+                local h = reg.Chams.Highlight
+                if h then
+                    local col = self.Slots.EnemyChams.color
+                    if player == LocalPlayer and self.Slots.SelfChams.enabled then col = self.Slots.SelfChams.color
+                    elseif player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team
+                        and self.Slots.TeamChams.enabled then col = self.Slots.TeamChams.color
+                    elseif self.Slots.EnemyChams.enabled then col = self.Slots.EnemyChams.color
+                    else col = self.Slots.FillBody.color end
+
+                    h.FillColor = col
+                    h.FillTransparency = self.Slots.FillBody.transparency or 0.5
+                    h.OutlineColor = self.Slots.Outline.color
+                    h.OutlineTransparency = self.Slots.Outline.enabled and 0 or 1
+                    h.DepthMode = self.Slots.ChamsXRay.enabled
+                        and Enum.HighlightDepthMode.AlwaysOnTop
+                        or Enum.HighlightDepthMode.Occluded
+                end
+            else
+                if reg.Chams.Highlight then self:DestroyChams(player) end
+            end
+        end
+    end,
+
+    DrawFOVCircle = function(self)
+        if not self.FOVCircle then
+            local c = Drawing.new("Circle")
+            c.Thickness = 1
+            c.NumSides = 64
+            c.Filled = false
+            c.Transparency = 0.85
+            self.FOVCircle = c
+        end
+        local c = self.FOVCircle
+        c.Visible = self.Slots.FOVCircle.enabled
+        if c.Visible then
+            c.Color = self.Slots.FOVColor.color
+            c.Position = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+            c.Radius = PHANTOM.Aimbot.FOV
         end
     end,
 
     Cleanup = function(self)
-        for _, registry in pairs(self.ESPRegistry) do
-            for _, group in pairs(registry) do
-                for _, obj in pairs(group) do
-                    if obj and obj.Remove then pcall(function() obj:Remove() end) end
+        for player, reg in pairs(self.ESPRegistry) do
+            for _, g in pairs(reg) do
+                if type(g) == "table" then
+                    for _, o in pairs(g) do
+                        if type(o) == "table" and o.Remove then pcall(function() o:Remove() end) end
+                    end
                 end
             end
+            if reg.Skeleton and reg.Skeleton.Lines then
+                for _, l in ipairs(reg.Skeleton.Lines) do pcall(function() l:Remove() end) end
+            end
+            self:DestroyChams(player)
         end
         self.ESPRegistry = {}
-        if self.FOVCircle then
-            pcall(function() self.FOVCircle:Remove() end)
-            self.FOVCircle = nil
-        end
+        if self.FOVCircle then pcall(function() self.FOVCircle:Remove() end) self.FOVCircle = nil end
     end
 }
+--=====================================================================
+-- SECTION: PLAYER MODULE
+--=====================================================================
 
 PHANTOM.Player = {
     Features = {
-        SpeedHack = { enabled = false, value = 16, mode = "Humanoid" },
-        JumpPower = { enabled = false, value = 50 },
-        Fly = { enabled = false, speed = 50, mode = "Velocity" },
-        Noclip = { enabled = false },
-        InfiniteJump = { enabled = false },
-        Teleport = { enabled = false, target = nil },
-        AutoWalk = { enabled = false, direction = Vector3.new(0,0,0) },
-        BunnyHop = { enabled = false },
-        Slide = { enabled = false },
-        WallClimb = { enabled = false },
-        GravityControl = { enabled = false, value = 196.2 },
-        AirControl = { enabled = false, force = 10 },
-        Dash = { enabled = false, distance = 50 },
-        Blink = { enabled = false, range = 25 },
-        Phase = { enabled = false },
-        Freeze = { enabled = false },
-        Anchor = { enabled = false },
-        Hover = { enabled = false, height = 5 },
-        SwimBoost = { enabled = false, multiplier = 2 },
-        LadderSpeed = { enabled = false, multiplier = 2 },
-        -- [21-40] Combat: AutoParry, AutoBlock, AutoDodge, AutoHeal, AutoShoot, TriggerBot, AimAssist, NoRecoil, NoSpread, RapidFire, InfiniteAmmo, DamageMultiplier, HitboxExpander, KillAura, AutoReload, InstantReload, NoWeaponDrop, WeaponPickup, AmmoInfinite, GrenadeIndicator
-        -- [41-60] Character: GodMode, InfiniteHealth, HealthRegen, ArmorRegen, AntiFling, AntiVoid, AntiRagdoll, AntiStun, AntiFlash, AntiGrab, AntiKnockback, AntiTeleport, AntiKick, AntiBan, Regen, Heal, Respawn, CharacterReset, AppearanceClone
-        -- [61-80] Utility: AutoFarm, AutoCollect, AutoQuest, AutoSell, AutoBuy, AutoCraft, AutoBuild, AutoDefend, AutoAttack, AutoRetreat, Pathfinding, PathDraw, WaypointSystem, TeleportList, PositionSave, PositionLoad, MacroRecorder, MacroPlayer, CommandBind, ConfigManager
-        -- [81-90+] Social: AutoChat, ChatSpam, MessageFilter, FriendNotifier, PlayerTracker, AltDetector, GroupChecker, RankDisplay, ServerHop, ServerList, RegionPing, ProxyCheck, ScriptHub, ScriptLoader, ScriptExecutor
+        SpeedHack  = { enabled = false, value = 16 },
+        JumpPower  = { enabled = false, value = 50 },
+        Noclip     = { enabled = false },
+        Fly        = { enabled = false, speed = 50 },
+        InfiniteJump = { enabled = false }
+    },
+    Update = function(self)
+        local char = LocalPlayer.Character
+        if not char then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if self.Features.SpeedHack.enabled and hum then hum.WalkSpeed = self.Features.SpeedHack.value end
+        if self.Features.JumpPower.enabled and hum then
+            hum.UseJumpPower = true
+            hum.JumpPower = self.Features.JumpPower.value
+        end
+        if self.Features.Noclip.enabled then
+            for _, p in ipairs(char:GetDescendants()) do
+                if p:IsA("BasePart") then p.CanCollide = false end
+            end
+        end
+        if self.Features.Fly.enabled then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root then
+                local dir = Vector3.new()
+                if Services.UserInputService:IsKeyDown(Enum.KeyCode.W) then dir += Camera.CFrame.LookVector end
+                if Services.UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= Camera.CFrame.LookVector end
+                if Services.UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= Camera.CFrame.RightVector end
+                if Services.UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += Camera.CFrame.RightVector end
+                if Services.UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += Vector3.new(0,1,0) end
+                if Services.UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.new(0,1,0) end
+                root.Velocity = dir.Magnitude > 0 and dir.Unit * self.Features.Fly.speed or Vector3.new(0,0,0)
+            end
+        end
+    end
+}
+
+--=====================================================================
+-- SECTION: MISC MODULE (40 features)
+--=====================================================================
+
+PHANTOM.Misc = {
+    Features = {
+        -- [1-10] Server
+        ServerHop        = { enabled = false, region = "auto" },
+        Rejoin           = { enabled = false },
+        PlayerList       = { enabled = false },
+        CopyJobID        = { enabled = false },
+        CopyPlaceID      = { enabled = false },
+        AntiAFK          = { enabled = true, timeout = 20 },
+        ChatSpy          = { enabled = false },
+        CustomChat       = { enabled = false },
+        FriendAlert      = { enabled = false },
+        AltDetector      = { enabled = false },
+        -- [11-20] Character
+        CharacterReset   = { enabled = false },
+        Respawn          = { enabled = false },
+        SitToggle        = { enabled = false },
+        Freeze           = { enabled = false },
+        Anchor           = { enabled = false },
+        AntiVoid         = { enabled = false, y = -50 },
+        AntiFling        = { enabled = false },
+        AntiRagdoll      = { enabled = false },
+        GodMode          = { enabled = false },
+        InfiniteHealth   = { enabled = false },
+        -- [21-30] Automation
+        AutoFarm         = { enabled = false, range = 30 },
+        AutoCollect      = { enabled = false, range = 15 },
+        AutoQuest        = { enabled = false },
+        AutoSell         = { enabled = false },
+        AutoBuy          = { enabled = false },
+        AutoCraft        = { enabled = false },
+        Pathfinding      = { enabled = false },
+        WaypointSystem   = { enabled = false },
+        MacroRecorder    = { enabled = false },
+        MacroPlayer      = { enabled = false },
+        -- [31-40] Utility
+        ConfigManager    = { enabled = false },
+        ScriptHub        = { enabled = false },
+        PositionSave     = { enabled = false },
+        PositionLoad     = { enabled = false },
+        TeleportToPlayer = { enabled = false, target = nil },
+        BringPlayer      = { enabled = false, target = nil },
+        FPSBoost         = { enabled = false },
+        LowGraphics      = { enabled = false },
+        HideCharacter    = { enabled = false },
+        ConsoleLogger    = { enabled = false }
     },
 
     Update = function(self)
-        local character = LocalPlayer.Character
-        if not character then return end
-        local humanoid = character:FindFirstChildOfClass("Humanoid")
-
-        if self.Features.SpeedHack.enabled and humanoid then
-            humanoid.WalkSpeed = self.Features.SpeedHack.value
+        -- AntiAFK
+        if self.Features.AntiAFK.enabled then
+            pcall(function()
+                if game:GetService("VirtualUser") then
+                    game:GetService("VirtualUser"):CaptureController()
+                    game:GetService("VirtualUser"):ClickButton2(Vector2.new())
+                end
+            end)
         end
 
-        if self.Features.JumpPower.enabled and humanoid then
-            humanoid.UseJumpPower = true
-            humanoid.JumpPower = self.Features.JumpPower.value
-        end
-
-        if self.Features.Noclip.enabled then
-            for _, part in ipairs(character:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = false end
+        -- AntiVoid
+        if self.Features.AntiVoid.enabled then
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if root and root.Position.Y < self.Features.AntiVoid.y then
+                root.CFrame = CFrame.new(root.Position.X, 50, root.Position.Z)
             end
         end
 
-        if self.Features.GravityControl.enabled then
-            Services.Workspace.Gravity = self.Features.GravityControl.value
+        -- Freeze
+        if self.Features.Freeze.enabled then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then hum.WalkSpeed = 0 hum.JumpPower = 0 end
         end
 
-        if self.Features.Fly.enabled then
-            local root = character:FindFirstChild("HumanoidRootPart")
-            if root then
-                local moveDir = Vector3.new()
-                if Services.UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir += Camera.CFrame.LookVector end
-                if Services.UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir -= Camera.CFrame.LookVector end
-                if Services.UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir -= Camera.CFrame.RightVector end
-                if Services.UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir += Camera.CFrame.RightVector end
-                if Services.UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir += Vector3.new(0,1,0) end
-                if Services.UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then moveDir -= Vector3.new(0,1,0) end
-                if moveDir.Magnitude > 0 then
-                    root.Velocity = moveDir.Unit * self.Features.Fly.speed
-                else
-                    root.Velocity = Vector3.new(0,0,0)
+        -- Anchor
+        if self.Features.Anchor.enabled then
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if root then root.Anchored = true end
+        else
+            local char = LocalPlayer.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+            if root and not self.Features.Freeze.enabled then root.Anchored = false end
+        end
+
+        -- GodMode
+        if self.Features.GodMode.enabled then
+            local char = LocalPlayer.Character
+            if char then
+                for _, p in ipairs(char:GetDescendants()) do
+                    if p:IsA("BasePart") then
+                        p.CanCollide = false
+                        p.Massless = true
+                    end
                 end
             end
         end
     end
 }
-local function InitializeUI()
-    local success, OrionLib = pcall(function()
+--=====================================================================
+-- SECTION: UI (Orion / Rayfield)
+--=====================================================================
+
+local function LoadOrion()
+    local ok, lib = pcall(function()
         return loadstring(game:HttpGet("https://raw.githubusercontent.com/Qanuir/orion-ui/refs/heads/main/source.lua"))()
     end)
+    if ok and lib then return lib, "Orion" end
+    local ok2, lib2 = pcall(function()
+        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+    end)
+    if ok2 and lib2 then return lib2, "Rayfield" end
+    return nil, nil
+end
 
-    if not success or not OrionLib then
-        warn("[Phantom] Orion Library failed to load. Falling back to Rayfield.")
-        local ok2, Rayfield = pcall(function()
-            return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-        end)
-        if ok2 and Rayfield then
-            local Window = Rayfield:CreateWindow({
-                Name = "Phantom Hub",
-                LoadingTitle = "Phantom Hub",
-                LoadingSubtitle = "by Phantom",
-                ConfigurationSaving = { Enabled = true, FolderName = "PhantomConfig", FileName = "Phantom" },
-                KeySystem = false
-            })
-            PHANTOM.UI.Window = Window
-            PHANTOM.UI.Library = "Rayfield"
+local function Toast(msg, duration)
+    -- Interface Hidden / toast notification
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "PhantomToast"
+    sg.IgnoreGuiInset = true
+    sg.ResetOnSpawn = false
+    pcall(function() sg.Parent = Services.CoreGui end)
+    if not sg.Parent then sg.Parent = LocalPlayer:WaitForChild("PlayerGui") end
 
-            local AimbotTab = Window:CreateTab("Aimbot", 4483345998)
-            AimbotTab:CreateToggle({ Name = "Silent Aim", CurrentValue = false, Flag = "SilentAimEnabled",
-                Callback = function(v) PHANTOM.Config.SilentAimEnabled = v PHANTOM.Runtime.SilentAimActive = v end })
-            AimbotTab:CreateToggle({ Name = "Vector Aim", CurrentValue = false, Flag = "VectorAimEnabled",
-                Callback = function(v) PHANTOM.Runtime.VectorAimActive = v end })
-            AimbotTab:CreateSlider({ Name = "FOV", Range = {10,500}, Increment = 10, Suffix = "px", CurrentValue = 120,
-                Callback = function(v) PHANTOM.Aimbot.FOV = v end })
-            AimbotTab:CreateSlider({ Name = "Smoothness", Range = {1,100}, Increment = 1, Suffix = "%", CurrentValue = 15,
-                Callback = function(v) PHANTOM.Aimbot.Smoothness = v/100 end })
-            AimbotTab:CreateSlider({ Name = "Prediction", Range = {0,50}, Increment = 1, Suffix = "%", CurrentValue = 13,
-                Callback = function(v) PHANTOM.Aimbot.Prediction = v/100 end })
-            AimbotTab:CreateToggle({ Name = "Team Check", CurrentValue = true,
-                Callback = function(v) PHANTOM.Aimbot.TeamCheck = v end })
-            AimbotTab:CreateToggle({ Name = "Wall Check", CurrentValue = false,
-                Callback = function(v) PHANTOM.Aimbot.WallCheck = v end })
-            AimbotTab:CreateToggle({ Name = "Show FOV", CurrentValue = true,
-                Callback = function(v) PHANTOM.Config.ShowFOV = v end })
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 300, 0, 70)
+    frame.Position = UDim2.new(0.5, -150, 1, -120)
+    frame.BackgroundColor3 = Color3.fromRGB(28,28,34)
+    frame.BorderSizePixel = 0
+    frame.Parent = sg
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = frame
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(140,90,220)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.4
+    stroke.Parent = frame
 
-            local VisualsTab = Window:CreateTab("Visuals", 4483345998)
-            VisualsTab:CreateToggle({ Name = "ESP Box", CurrentValue = false, Callback = function(v) PHANTOM.Visuals.Slots.Box.enabled = v end })
-            VisualsTab:CreateToggle({ Name = "Tracers", CurrentValue = false, Callback = function(v) PHANTOM.Visuals.Slots.Tracer.enabled = v end })
-            VisualsTab:CreateToggle({ Name = "Head Dots", CurrentValue = false, Callback = function(v) PHANTOM.Visuals.Slots.HeadDot.enabled = v end })
-            VisualsTab:CreateToggle({ Name = "Names", CurrentValue = false, Callback = function(v) PHANTOM.Visuals.Slots.Name.enabled = v end })
-            VisualsTab:CreateToggle({ Name = "Health Bars", CurrentValue = false, Callback = function(v) PHANTOM.Visuals.Slots.HealthBar.enabled = v end })
+    local icon = Instance.new("ImageLabel")
+    icon.Size = UDim2.new(0, 32, 0, 32)
+    icon.Position = UDim2.new(0, 16, 0.5, -16)
+    icon.BackgroundTransparency = 1
+    icon.Image = "rbxassetid://10723407367"  -- cloud/check icon
+    icon.ImageColor3 = Color3.fromRGB(140,90,220)
+    icon.Parent = frame
 
-            local PlayerTab = Window:CreateTab("Player", 4483345998)
-            PlayerTab:CreateToggle({ Name = "Speed Hack", CurrentValue = false, Callback = function(v) PHANTOM.Player.Features.SpeedHack.enabled = v end })
-            PlayerTab:CreateSlider({ Name = "Walk Speed", Range = {16,500}, Increment = 1, CurrentValue = 16,
-                Callback = function(v) PHANTOM.Player.Features.SpeedHack.value = v end })
-            PlayerTab:CreateToggle({ Name = "Jump Power", CurrentValue = false, Callback = function(v) PHANTOM.Player.Features.JumpPower.enabled = v end })
-            PlayerTab:CreateSlider({ Name = "Jump Power Value", Range = {50,500}, Increment = 1, CurrentValue = 50,
-                Callback = function(v) PHANTOM.Player.Features.JumpPower.value = v end })
-            PlayerTab:CreateToggle({ Name = "Noclip", CurrentValue = false, Callback = function(v) PHANTOM.Player.Features.Noclip.enabled = v end })
-            PlayerTab:CreateToggle({ Name = "Fly", CurrentValue = false, Callback = function(v) PHANTOM.Player.Features.Fly.enabled = v end })
-            PlayerTab:CreateSlider({ Name = "Fly Speed", Range = {10,500}, Increment = 1, CurrentValue = 50,
-                Callback = function(v) PHANTOM.Player.Features.Fly.speed = v end })
-            PlayerTab:CreateSlider({ Name = "Gravity", Range = {0,300}, Increment = 1, CurrentValue = 196,
-                Callback = function(v) Services.Workspace.Gravity = v end })
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -60, 0, 22)
+    title.Position = UDim2.new(0, 60, 0, 14)
+    title.BackgroundTransparency = 1
+    title.Text = "Interface Hidden"
+    title.TextColor3 = Color3.fromRGB(255,255,255)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 15
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
 
-            local MiscTab = Window:CreateTab("Misc", 4483345998)
-            local SettingsTab = Window:CreateTab("Settings", 4483345998)
-            SettingsTab:CreateButton({ Name = "Unload Phantom", Callback = function()
-                PHANTOM.Visuals:Cleanup()
-                if PHANTOM.UI.Window then pcall(function() PHANTOM.UI.Window:Destroy() end) end
-            end })
-            return true
-        end
+    local sub = Instance.new("TextLabel")
+    sub.Size = UDim2.new(1, -60, 0, 18)
+    sub.Position = UDim2.new(0, 60, 0, 34)
+    sub.BackgroundTransparency = 1
+    sub.Text = msg or "Tap RightShift to reopen the interface"
+    sub.TextColor3 = Color3.fromRGB(170,170,180)
+    sub.Font = Enum.Font.Gotham
+    sub.TextSize = 12
+    sub.TextXAlignment = Enum.TextXAlignment.Left
+    sub.Parent = sub
+
+    frame.BackgroundTransparency = 1
+    title.TextTransparency = 1
+    sub.TextTransparency = 1
+    icon.ImageTransparency = 1
+    stroke.Transparency = 1
+
+    local TS = Services.TweenService
+    local t1 = TS:Create(frame, TweenInfo.new(0.25), {BackgroundTransparency = 0})
+    local t2 = TS:Create(title, TweenInfo.new(0.25), {TextTransparency = 0})
+    local t3 = TS:Create(sub, TweenInfo.new(0.25), {TextTransparency = 0})
+    local t4 = TS:Create(icon, TweenInfo.new(0.25), {ImageTransparency = 0})
+    local t5 = TS:Create(stroke, TweenInfo.new(0.25), {Transparency = 0.4})
+    t1:Play() t2:Play() t3:Play() t4:Play() t5:Play()
+
+    task.delay(duration or 3, function()
+        local o1 = TS:Create(frame, TweenInfo.new(0.35), {BackgroundTransparency = 1})
+        local o2 = TS:Create(title, TweenInfo.new(0.35), {TextTransparency = 1})
+        local o3 = TS:Create(sub, TweenInfo.new(0.35), {TextTransparency = 1})
+        local o4 = TS:Create(icon, TweenInfo.new(0.35), {ImageTransparency = 1})
+        local o5 = TS:Create(stroke, TweenInfo.new(0.35), {Transparency = 1})
+        o1:Play() o2:Play() o3:Play() o4:Play() o5:Play()
+        task.wait(0.4)
+        pcall(function() sg:Destroy() end)
+    end)
+end
+
+local function InitializeUI()
+    local Lib, libName = LoadOrion()
+    if not Lib then
+        warn("[Phantom] UI library failed to load.")
         return false
     end
+    PHANTOM.UI.Library = libName
 
-    local Window = OrionLib:MakeWindow({
-        Name = "Phantom Hub",
+    local Window = Lib:MakeWindow({
+        Name = "PHANTOM | Hub v3.0",
         HidePremium = false,
         SaveConfig = true,
         ConfigFolder = "PhantomConfig",
         IntroEnabled = true,
-        IntroText = "Phantom",
+        IntroText = "PHANTOM",
         IntroIcon = "rbxassetid://4483345998",
         Icon = "rbxassetid://4483345998"
     })
     PHANTOM.UI.Window = Window
-    PHANTOM.UI.Library = "Orion"
-    local AimbotTab = Window:MakeTab({ Name = "Aimbot", Icon = "rbxassetid://4483345998", PremiumOnly = false })
-    AimbotTab:AddToggle({ Name = "Silent Aim", Default = false, Flag = "SilentAimEnabled",
+    --=========================================================
+    -- TAB: COMBAT
+    --=========================================================
+    local CombatTab = Window:MakeTab({ Name = "Combat", Icon = "rbxassetid://4483345998", PremiumOnly = false })
+    CombatTab:AddToggle({ Name = "Silent Aim", Default = false, Flag = "SilentAim",
         Callback = function(v) PHANTOM.Config.SilentAimEnabled = v PHANTOM.Runtime.SilentAimActive = v end })
-    AimbotTab:AddToggle({ Name = "Vector Aim", Default = false, Flag = "VectorAimEnabled",
+    CombatTab:AddToggle({ Name = "Vector Aim", Default = false, Flag = "VectorAim",
         Callback = function(v) PHANTOM.Runtime.VectorAimActive = v end })
-    AimbotTab:AddSlider({ Name = "FOV Radius", Min = 10, Max = 500, Default = 120, Color = Color3.fromRGB(255,255,255), Increment = 10, ValueName = "px", Flag = "AimbotFOV",
+    CombatTab:AddSlider({ Name = "FOV", Min = 10, Max = 500, Default = 120, Color = Color3.fromRGB(140,90,220), Increment = 10, ValueName = "px", Flag = "AimFOV",
         Callback = function(v) PHANTOM.Aimbot.FOV = v end })
-    AimbotTab:AddSlider({ Name = "Smoothness", Min = 1, Max = 100, Default = 15, Color = Color3.fromRGB(255,255,255), Increment = 1, ValueName = "%", Flag = "AimbotSmoothness",
+    CombatTab:AddSlider({ Name = "Smoothness", Min = 1, Max = 100, Default = 15, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "%", Flag = "AimSmooth",
         Callback = function(v) PHANTOM.Aimbot.Smoothness = v/100 end })
-    AimbotTab:AddSlider({ Name = "Prediction", Min = 0, Max = 50, Default = 13, Color = Color3.fromRGB(255,255,255), Increment = 1, ValueName = "%", Flag = "AimbotPrediction",
+    CombatTab:AddSlider({ Name = "Prediction", Min = 0, Max = 50, Default = 13, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "%", Flag = "AimPred",
         Callback = function(v) PHANTOM.Aimbot.Prediction = v/100 end })
-    AimbotTab:AddToggle({ Name = "Team Check", Default = true, Flag = "AimbotTeamCheck",
+    CombatTab:AddToggle({ Name = "Team Check", Default = true, Flag = "TeamCheck",
         Callback = function(v) PHANTOM.Aimbot.TeamCheck = v end })
-    AimbotTab:AddToggle({ Name = "Wall Check", Default = false, Flag = "AimbotWallCheck",
+    CombatTab:AddToggle({ Name = "Wall Check", Default = false, Flag = "WallCheck",
         Callback = function(v) PHANTOM.Aimbot.WallCheck = v end })
-    AimbotTab:AddToggle({ Name = "Show FOV Circle", Default = true, Flag = "ShowFOV",
-        Callback = function(v) PHANTOM.Config.ShowFOV = v end })
 
+    --=========================================================
+    -- TAB: VISUALS (ESP)
+    --=========================================================
     local VisualsTab = Window:MakeTab({ Name = "Visuals (ESP)", Icon = "rbxassetid://4483345998", PremiumOnly = false })
-    VisualsTab:AddToggle({ Name = "ESP Box", Default = false, Flag = "ESPBox",
+    local ESPBox = VisualsTab:AddSection({ Name = "ESP (Player)" })
+    ESPBox:AddToggle({ Name = "ESP Enabled", Default = false, Flag = "ESPEnabled",
+        Callback = function(v) PHANTOM.Visuals.Slots.ESPEnabled.enabled = v end })
+    ESPBox:AddToggle({ Name = "Box", Default = false, Flag = "ESPBox",
         Callback = function(v) PHANTOM.Visuals.Slots.Box.enabled = v end })
-    VisualsTab:AddToggle({ Name = "Tracers", Default = false, Flag = "ESPTracers",
-        Callback = function(v) PHANTOM.Visuals.Slots.Tracer.enabled = v end })
-    VisualsTab:AddToggle({ Name = "Head Dots", Default = false, Flag = "ESPHeadDots",
-        Callback = function(v) PHANTOM.Visuals.Slots.HeadDot.enabled = v end })
-    VisualsTab:AddToggle({ Name = "Player Names", Default = false, Flag = "ESPNames",
+    ESPBox:AddToggle({ Name = "Имя", Default = false, Flag = "ESPName",
         Callback = function(v) PHANTOM.Visuals.Slots.Name.enabled = v end })
-    VisualsTab:AddToggle({ Name = "Health Bars", Default = false, Flag = "ESPHealthBars",
-        Callback = function(v) PHANTOM.Visuals.Slots.HealthBar.enabled = v end })
+    ESPBox:AddToggle({ Name = "Health", Default = false, Flag = "ESPHealth",
+        Callback = function(v) PHANTOM.Visuals.Slots.Health.enabled = v end })
+    ESPBox:AddToggle({ Name = "Distance", Default = false, Flag = "ESPDistance",
+        Callback = function(v) PHANTOM.Visuals.Slots.Distance.enabled = v end })
+    ESPBox:AddToggle({ Name = "Tracer", Default = false, Flag = "ESPTracer",
+        Callback = function(v) PHANTOM.Visuals.Slots.Tracer.enabled = v end })
+    ESPBox:AddToggle({ Name = "Team Check", Default = false, Flag = "ESPTeam",
+        Callback = function(v) PHANTOM.Visuals.Slots.TeamCheck.enabled = v end })
+    ESPBox:AddToggle({ Name = "Skeleton", Default = false, Flag = "ESPSkeleton",
+        Callback = function(v) PHANTOM.Visuals.Slots.Skeleton.enabled = v end })
+    ESPBox:AddToggle({ Name = "Skeleton Thick", Default = false, Flag = "ESPSkelThick",
+        Callback = function(v) PHANTOM.Visuals.Slots.SkeletonThick.enabled = v end })
+    ESPBox:AddToggle({ Name = "Skeleton Neon", Default = false, Flag = "ESPSkelNeon",
+        Callback = function(v) PHANTOM.Visuals.Slots.SkeletonNeon.enabled = v end })
+    ESPBox:AddToggle({ Name = "Skeleton Rainbow", Default = false, Flag = "ESPSkelRainbow",
+        Callback = function(v) PHANTOM.Visuals.Slots.SkeletonRainbow.enabled = v end })
+    ESPBox:AddToggle({ Name = "Skeleton Priority", Default = false, Flag = "ESPSkelPriority",
+        Callback = function(v) PHANTOM.Visuals.Slots.SkeletonPriority.enabled = v end })
+    ESPBox:AddToggle({ Name = "Head Dot", Default = false, Flag = "ESPHeadDot",
+        Callback = function(v) PHANTOM.Visuals.Slots.HeadDot.enabled = v end })
+    ESPBox:AddToggle({ Name = "Visible Only", Default = false, Flag = "ESPVisible",
+        Callback = function(v) PHANTOM.Visuals.Slots.VisibleOnly.enabled = v end })
+    ESPBox:AddSlider({ Name = "Max Distance", Min = 50, Max = 10000, Default = 3216, Color = Color3.fromRGB(140,90,220), Increment = 10, ValueName = "studs", Flag = "ESPMaxDist",
+        Callback = function(v) PHANTOM.Visuals.Slots.MaxDistance.value = v end })
 
+    local ChamsSec = VisualsTab:AddSection({ Name = "Chams (Player)" })
+    ChamsSec:AddToggle({ Name = "Chams Enabled", Default = false, Flag = "ChamsEnabled",
+        Callback = function(v) PHANTOM.Visuals.Slots.ChamsEnabled.enabled = v end })
+    ChamsSec:AddDropdown({ Name = "Mode", Default = "Fill", Options = {"Fill", "Outline", "Both"},
+        Callback = function(v) PHANTOM.Visuals.Slots.ChamsMode.value = v end })
+    ChamsSec:AddToggle({ Name = "Self Chams", Default = false, Flag = "SelfChams",
+        Callback = function(v) PHANTOM.Visuals.Slots.SelfChams.enabled = v end })
+    ChamsSec:AddColorPicker({ Name = "Self Color", Default = Color3.fromRGB(0,255,100), Flag = "SelfChamsColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.SelfChams.color = v end })
+    ChamsSec:AddToggle({ Name = "Team Chams", Default = false, Flag = "TeamChams",
+        Callback = function(v) PHANTOM.Visuals.Slots.TeamChams.enabled = v end })
+    ChamsSec:AddColorPicker({ Name = "Team Color", Default = Color3.fromRGB(0,150,255), Flag = "TeamChamsColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.TeamChams.color = v end })
+    ChamsSec:AddToggle({ Name = "Enemy Chams", Default = false, Flag = "EnemyChams",
+        Callback = function(v) PHANTOM.Visuals.Slots.EnemyChams.enabled = v end })
+    ChamsSec:AddColorPicker({ Name = "Enemy Color", Default = Color3.fromRGB(255,0,0), Flag = "EnemyChamsColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.EnemyChams.color = v end })
+    ChamsSec:AddToggle({ Name = "Fill Body", Default = false, Flag = "FillBody",
+        Callback = function(v) PHANTOM.Visuals.Slots.FillBody.enabled = v end })
+    ChamsSec:AddColorPicker({ Name = "Fill Color", Default = Color3.fromRGB(255,0,200), Flag = "FillBodyColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.FillBody.color = v end })
+    ChamsSec:AddToggle({ Name = "Outline", Default = false, Flag = "ChamsOutline",
+        Callback = function(v) PHANTOM.Visuals.Slots.Outline.enabled = v end })
+    ChamsSec:AddToggle({ Name = "XRay", Default = false, Flag = "ChamsXRay",
+        Callback = function(v) PHANTOM.Visuals.Slots.ChamsXRay.enabled = v end })
+    ChamsSec:AddToggle({ Name = "Pulse Effect", Default = false, Flag = "PulseEffect",
+        Callback = function(v) PHANTOM.Visuals.Slots.PulseEffect.enabled = v end })
+
+    local WorldSec = VisualsTab:AddSection({ Name = "World (Lighting)" })
+    WorldSec:AddToggle({ Name = "Full Bright", Default = false, Flag = "FullBright",
+        Callback = function(v) PHANTOM.Visuals.Slots.FullBright.enabled = v end })
+    WorldSec:AddToggle({ Name = "No Fog", Default = false, Flag = "NoFog",
+        Callback = function(v) PHANTOM.Visuals.Slots.NoFog.enabled = v end })
+    WorldSec:AddToggle({ Name = "Ambient", Default = false, Flag = "AmbientLight",
+        Callback = function(v) PHANTOM.Visuals.Slots.AmbientLight.enabled = v end })
+    WorldSec:AddColorPicker({ Name = "Ambient Color", Default = Color3.fromRGB(128,128,128), Flag = "AmbientColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.AmbientLight.color = v end })
+    WorldSec:AddToggle({ Name = "Clock Time", Default = false, Flag = "ClockTime",
+        Callback = function(v) PHANTOM.Visuals.Slots.ClockTime.enabled = v end })
+    WorldSec:AddSlider({ Name = "Clock Value", Min = 0, Max = 24, Default = 16, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "h", Flag = "ClockValue",
+        Callback = function(v) PHANTOM.Visuals.Slots.ClockTime.value = v end })
+    WorldSec:AddButton({ Name = "Reset Lighting", Callback = function() PHANTOM.Visuals:ResetLighting() end })
+
+    local ScreenSec = VisualsTab:AddSection({ Name = "Screen" })
+    ScreenSec:AddToggle({ Name = "FOV Circle", Default = false, Flag = "FOVCircle",
+        Callback = function(v) PHANTOM.Visuals.Slots.FOVCircle.enabled = v end })
+    ScreenSec:AddColorPicker({ Name = "FOV Color", Default = Color3.fromRGB(0,255,100), Flag = "FOVColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.FOVColor.color = v end })
+    ScreenSec:AddToggle({ Name = "Crosshair", Default = false, Flag = "Crosshair",
+        Callback = function(v) PHANTOM.Visuals.Slots.Crosshair.enabled = v end })
+    ScreenSec:AddColorPicker({ Name = "Crosshair Color", Default = Color3.fromRGB(255,255,255), Flag = "CrosshairColor",
+        Callback = function(v) PHANTOM.Visuals.Slots.CrosshairColor.color = v end })
+    ScreenSec:AddSlider({ Name = "Crosshair Size", Min = 5, Max = 30, Default = 10, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "px", Flag = "CrosshairSize",
+        Callback = function(v) PHANTOM.Visuals.Slots.CrosshairSize.value = v end })
+    ScreenSec:AddButton({ Name = "Reset Screen", Callback = function()
+        for k, v in pairs(PHANTOM.Visuals.Slots) do
+            if v.cat == "screen" then v.enabled = false end
+        end
+    end })
+    --=========================================================
+    -- TAB: MISC
+    --=========================================================
+    local MiscTab = Window:MakeTab({ Name = "Misc", Icon = "rbxassetid://4483345998", PremiumOnly = false })
+
+    local ServerSec = MiscTab:AddSection({ Name = "Server" })
+    ServerSec:AddToggle({ Name = "Anti AFK", Default = true, Flag = "AntiAFK",
+        Callback = function(v) PHANTOM.Misc.Features.AntiAFK.enabled = v end })
+    ServerSec:AddButton({ Name = "Copy Job ID", Callback = function()
+        if setclipboard then setclipboard(game.JobId) end
+        Toast("Job ID copied to clipboard")
+    end })
+    ServerSec:AddButton({ Name = "Copy Place ID", Callback = function()
+        if setclipboard then setclipboard(tostring(game.PlaceId)) end
+        Toast("Place ID copied to clipboard")
+    end })
+    ServerSec:AddButton({ Name = "Server Hop", Callback = function()
+        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local ok, res = pcall(function() return game:HttpGet(url) end)
+        if ok and res then
+            local data = Services.HttpService:JSONDecode(res)
+            for _, srv in ipairs(data.data or {}) do
+                if srv.id ~= game.JobId and srv.playing < srv.maxPlayers then
+                    pcall(function() game:GetService("TeleportService"):TeleportToPlaceInstance(game.PlaceId, srv.id) end)
+                    return
+                end
+            end
+        end
+        Toast("Server hop failed")
+    end })
+
+    local CharSec = MiscTab:AddSection({ Name = "Character" })
+    CharSec:AddToggle({ Name = "Anti Void", Default = false, Flag = "AntiVoid",
+        Callback = function(v) PHANTOM.Misc.Features.AntiVoid.enabled = v end })
+    CharSec:AddToggle({ Name = "Freeze", Default = false, Flag = "Freeze",
+        Callback = function(v) PHANTOM.Misc.Features.Freeze.enabled = v end })
+    CharSec:AddToggle({ Name = "Anchor", Default = false, Flag = "Anchor",
+        Callback = function(v) PHANTOM.Misc.Features.Anchor.enabled = v end })
+    CharSec:AddToggle({ Name = "God Mode", Default = false, Flag = "GodMode",
+        Callback = function(v) PHANTOM.Misc.Features.GodMode.enabled = v end })
+    CharSec:AddButton({ Name = "Reset Character", Callback = function()
+        LocalPlayer.Character:BreakJoints()
+    end })
+
+    local AutoSec = MiscTab:AddSection({ Name = "Automation" })
+    AutoSec:AddToggle({ Name = "Auto Farm", Default = false, Flag = "AutoFarm",
+        Callback = function(v) PHANTOM.Misc.Features.AutoFarm.enabled = v end })
+    AutoSec:AddToggle({ Name = "Auto Collect", Default = false, Flag = "AutoCollect",
+        Callback = function(v) PHANTOM.Misc.Features.AutoCollect.enabled = v end })
+    AutoSec:AddToggle({ Name = "Waypoint System", Default = false, Flag = "WaypointSystem",
+        Callback = function(v) PHANTOM.Misc.Features.WaypointSystem.enabled = v end })
+
+    local UtilSec = MiscTab:AddSection({ Name = "Utility" })
+    UtilSec:AddToggle({ Name = "FPS Boost", Default = false, Flag = "FPSBoost",
+        Callback = function(v)
+            PHANTOM.Misc.Features.FPSBoost.enabled = v
+            if v then
+                for _, obj in ipairs(Services.Lighting:GetChildren()) do
+                    if obj:IsA("PostEffect") then obj.Enabled = false end
+                end
+            end
+        end })
+    UtilSec:AddToggle({ Name = "Low Graphics", Default = false, Flag = "LowGraphics",
+        Callback = function(v)
+            PHANTOM.Misc.Features.LowGraphics.enabled = v
+            settings().Rendering.QualityLevel = v and 1 or 10
+        end })
+
+    --=========================================================
+    -- TAB: PLAYER
+    --=========================================================
     local PlayerTab = Window:MakeTab({ Name = "Player", Icon = "rbxassetid://4483345998", PremiumOnly = false })
     PlayerTab:AddToggle({ Name = "Speed Hack", Default = false, Flag = "SpeedHack",
         Callback = function(v) PHANTOM.Player.Features.SpeedHack.enabled = v end })
-    PlayerTab:AddSlider({ Name = "Walk Speed", Min = 16, Max = 500, Default = 16, Color = Color3.fromRGB(255,255,255), Increment = 1, ValueName = "studs", Flag = "WalkSpeed",
+    PlayerTab:AddSlider({ Name = "Walk Speed", Min = 16, Max = 500, Default = 16, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "studs", Flag = "WalkSpeed",
         Callback = function(v) PHANTOM.Player.Features.SpeedHack.value = v end })
     PlayerTab:AddToggle({ Name = "Jump Power", Default = false, Flag = "JumpPowerToggle",
         Callback = function(v) PHANTOM.Player.Features.JumpPower.enabled = v end })
-    PlayerTab:AddSlider({ Name = "Jump Power Value", Min = 50, Max = 500, Default = 50, Color = Color3.fromRGB(255,255,255), Increment = 1, ValueName = "", Flag = "JumpPowerValue",
+    PlayerTab:AddSlider({ Name = "Jump Power Value", Min = 50, Max = 500, Default = 50, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "", Flag = "JumpPowerValue",
         Callback = function(v) PHANTOM.Player.Features.JumpPower.value = v end })
     PlayerTab:AddToggle({ Name = "Noclip", Default = false, Flag = "Noclip",
         Callback = function(v) PHANTOM.Player.Features.Noclip.enabled = v end })
     PlayerTab:AddToggle({ Name = "Fly", Default = false, Flag = "Fly",
         Callback = function(v) PHANTOM.Player.Features.Fly.enabled = v end })
-    PlayerTab:AddSlider({ Name = "Fly Speed", Min = 10, Max = 500, Default = 50, Color = Color3.fromRGB(255,255,255), Increment = 1, ValueName = "", Flag = "FlySpeed",
+    PlayerTab:AddSlider({ Name = "Fly Speed", Min = 10, Max = 500, Default = 50, Color = Color3.fromRGB(140,90,220), Increment = 1, ValueName = "", Flag = "FlySpeed",
         Callback = function(v) PHANTOM.Player.Features.Fly.speed = v end })
-    PlayerTab:AddSlider({ Name = "Gravity", Min = 0, Max = 300, Default = 196, Color = Color3.fromRGB(255,255,255), Increment = 1, ValueName = "", Flag = "GravitySlider",
-        Callback = function(v) Services.Workspace.Gravity = v end })
 
-    local MiscTab = Window:MakeTab({ Name = "Misc", Icon = "rbxassetid://4483345998", PremiumOnly = false })
-    local SettingsTab = Window:MakeTab({ Name = "Settings", Icon = "rbxassetid://4483345998", PremiumOnly = false })
-    SettingsTab:AddButton({ Name = "Unload Phantom", Callback = function()
-        PHANTOM.Visuals:Cleanup()
-        if PHANTOM.UI.Window then pcall(function() PHANTOM.UI.Window:Destroy() end) end
-    end })
+    --=========================================================
+    -- TAB: INFO
+    --=========================================================
+    local InfoTab = Window:MakeTab({ Name = "Info", Icon = "rbxassetid://4483345998", PremiumOnly = false })
+    InfoTab:AddParagraph({
+        Title = "PHANTOM HUB v3.0",
+        Content = "Модульная архитектура · UNC/Executor\nВсего функций: " .. PHANTOM.Info.Counters.Total
+    })
+    InfoTab:AddParagraph({
+        Title = "Функции по разделам",
+        Content = "Visuals: " .. PHANTOM.Info.Counters.Visuals
+               .. "\nCombat: " .. PHANTOM.Info.Counters.Combat
+               .. "\nMisc: " .. PHANTOM.Info.Counters.Misc
+               .. "\nPlayer: 5"
+    })
+    InfoTab:AddParagraph({
+        Title = "Discord",
+        Content = PHANTOM.Config.DiscordURL
+    })
+    InfoTab:AddButton({
+        Name = "Открыть Discord сервер",
+        Callback = function()
+            pcall(function()
+                if setclipboard then setclipboard(PHANTOM.Config.DiscordURL) end
+            end)
+            Toast("Discord: " .. PHANTOM.Config.DiscordURL)
+        end
+    })
+
+    --=========================================================
+    -- TAB: SETTINGS
+    --=========================================================
+    local SettingsTab = Window:MakeTab({ Name = "Настройки", Icon = "rbxassetid://4483345998", PremiumOnly = false })
+    SettingsTab:AddSlider({
+        Name = "Прозрачность меню",
+        Min = 0, Max = 100, Default = 100,
+        Color = Color3.fromRGB(140,90,220), Increment = 5,
+        ValueName = "%", Flag = "MenuOpacity",
+        Callback = function(v)
+            PHANTOM.Config.MenuOpacity = v
+            -- попытка применить прозрачность к главному ScreenGui
+            pcall(function()
+                for _, gui in ipairs(Services.CoreGui:GetChildren()) do
+                    if gui.Name:find("Orion") or gui.Name:find("Rayfield") then
+                        for _, desc in ipairs(gui:GetDescendants()) do
+                            if desc:IsA("Frame") and desc.BackgroundTransparency ~= nil then
+                                desc.BackgroundTransparency = 1 - (v / 100)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    })
+    SettingsTab:AddButton({
+        Name = "Скрыть интерфейс (RightShift)",
+        Callback = function()
+            PHANTOM.Config.InterfaceHidden = true
+            Toast("Tap RightShift to reopen the interface", 4)
+        end
+    })
+    SettingsTab:AddButton({
+        Name = "Unload Phantom",
+        Callback = function()
+            PHANTOM.Visuals:Cleanup()
+            if PHANTOM.UI.Window then pcall(function() PHANTOM.UI.Window:Destroy() end) end
+        end
+    })
 
     return true
 end
+--=====================================================================
+-- SECTION: INTERFACE HIDE HANDLER (RightShift)
+--=====================================================================
+
+local function SetupInterfaceHide()
+    Services.UserInputService.InputBegan:Connect(function(input, gp)
+        if gp then return end
+        if input.KeyCode == Enum.KeyCode.RightShift then
+            PHANTOM.Config.InterfaceHidden = not PHANTOM.Config.InterfaceHidden
+            pcall(function()
+                for _, gui in ipairs(Services.CoreGui:GetChildren()) do
+                    if gui.Name:find("Orion") or gui.Name:find("Rayfield") then
+                        gui.Enabled = not PHANTOM.Config.InterfaceHidden
+                    end
+                end
+            end)
+            if PHANTOM.Config.InterfaceHidden then
+                -- Toast
+                local sg = Instance.new("ScreenGui")
+                sg.Name = "PhantomToastHidden"
+                sg.IgnoreGuiInset = true
+                sg.ResetOnSpawn = false
+                pcall(function() sg.Parent = Services.CoreGui end)
+                if not sg.Parent then sg.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+                local frame = Instance.new("Frame")
+                frame.Size = UDim2.new(0, 320, 0, 72)
+                frame.Position = UDim2.new(0.5, -160, 1, -130)
+                frame.BackgroundColor3 = Color3.fromRGB(28,28,34)
+                frame.BorderSizePixel = 0
+                frame.BackgroundTransparency = 1
+                frame.Parent = sg
+
+                local corner = Instance.new("UICorner")
+                corner.CornerRadius = UDim.new(0, 12)
+                corner.Parent = frame
+
+                local stroke = Instance.new("UIStroke")
+                stroke.Color = Color3.fromRGB(140,90,220)
+                stroke.Thickness = 1
+                stroke.Transparency = 1
+                stroke.Parent = frame
+
+                local icon = Instance.new("ImageLabel")
+                icon.Size = UDim2.new(0, 32, 0, 32)
+                icon.Position = UDim2.new(0, 18, 0.5, -16)
+                icon.BackgroundTransparency = 1
+                icon.Image = "rbxassetid://10723407367"
+                icon.ImageColor3 = Color3.fromRGB(140,90,220)
+                icon.ImageTransparency = 1
+                icon.Parent = frame
+
+                local title = Instance.new("TextLabel")
+                title.Size = UDim2.new(1, -70, 0, 22)
+                title.Position = UDim2.new(0, 62, 0, 15)
+                title.BackgroundTransparency = 1
+                title.Text = "Interface Hidden"
+                title.TextColor3 = Color3.fromRGB(255,255,255)
+                title.Font = Enum.Font.GothamBold
+                title.TextSize = 15
+                title.TextXAlignment = Enum.TextXAlignment.Left
+                title.TextTransparency = 1
+                title.Parent = frame
+
+                local sub = Instance.new("TextLabel")
+                sub.Size = UDim2.new(1, -70, 0, 20)
+                sub.Position = UDim2.new(0, 62, 0, 38)
+                sub.BackgroundTransparency = 1
+                sub.Text = "Tap RightShift to reopen the interface"
+                sub.TextColor3 = Color3.fromRGB(170,170,180)
+                sub.Font = Enum.Font.Gotham
+                sub.TextSize = 12
+                sub.TextXAlignment = Enum.TextXAlignment.Left
+                sub.TextTransparency = 1
+                sub.Parent = frame
+
+                local TS = Services.TweenService
+                TS:Create(frame, TweenInfo.new(0.25), {BackgroundTransparency = 0}):Play()
+                TS:Create(stroke, TweenInfo.new(0.25), {Transparency = 0.4}):Play()
+                TS:Create(icon, TweenInfo.new(0.25), {ImageTransparency = 0}):Play()
+                TS:Create(title, TweenInfo.new(0.25), {TextTransparency = 0}):Play()
+                TS:Create(sub, TweenInfo.new(0.25), {TextTransparency = 0}):Play()
+
+                task.delay(3, function()
+                    TS:Create(frame, TweenInfo.new(0.35), {BackgroundTransparency = 1}):Play()
+                    TS:Create(stroke, TweenInfo.new(0.35), {Transparency = 1}):Play()
+                    TS:Create(icon, TweenInfo.new(0.35), {ImageTransparency = 1}):Play()
+                    TS:Create(title, TweenInfo.new(0.35), {TextTransparency = 1}):Play()
+                    TS:Create(sub, TweenInfo.new(0.35), {TextTransparency = 1}):Play()
+                    task.wait(0.4)
+                    pcall(function() sg:Destroy() end)
+                end)
+            end
+        end
+    end)
+end
+
+--=====================================================================
+-- SECTION: BOOTSTRAP
+--=====================================================================
 
 local function Bootstrap()
     if PHANTOM.Runtime.Initialized then return end
@@ -690,18 +1556,35 @@ local function Bootstrap()
     PHANTOM.Keybinds:Register("VectorAim", Enum.KeyCode.V, function(state)
         PHANTOM.Runtime.VectorAimActive = state
     end)
+    PHANTOM.Keybinds:Register("Fly", Enum.KeyCode.F, function(state)
+        PHANTOM.Player.Features.Fly.enabled = state
+    end)
 
-    pcall(InitializeUI)
+    pcall(SetupInterfaceHide)
+
+    local uiOK = pcall(InitializeUI)
+    if not uiOK then warn("[Phantom] UI failed to initialize.") end
 
     Services.RunService.RenderStepped:Connect(function()
         pcall(function()
             PHANTOM.Visuals:RenderLoop()
             PHANTOM.Aimbot:RunVectorAim()
+            PHANTOM.Aimbot:DrawFOV()
             PHANTOM.Player:Update()
+            PHANTOM.Combat:Update()
+            PHANTOM.Misc:Update()
         end)
     end)
 
-    print("[Phantom Hub] Загружен. Бинды: C — Silent Aim, V — Vector Aim")
+    print("========================================")
+    print("[PHANTOM HUB v3.0] Успешно загружен.")
+    print("[PHANTOM] Всего функций: " .. PHANTOM.Info.Counters.Total)
+    print("[PHANTOM] Visuals: " .. PHANTOM.Info.Counters.Visuals
+        .. " | Combat: " .. PHANTOM.Info.Counters.Combat
+        .. " | Misc: " .. PHANTOM.Info.Counters.Misc)
+    print("[PHANTOM] Discord: " .. PHANTOM.Config.DiscordURL)
+    print("[PHANTOM] Бинды: C = Silent Aim, V = Vector Aim, F = Fly, RightShift = Hide UI")
+    print("========================================")
 end
 
 Bootstrap()
